@@ -1,13 +1,20 @@
 import os
 import time
+import threading
 import spidev
 
 try:
-    from gpiozero import PWMOutputDevice, OutputDevice, Button, Device
+    from gpiozero import PWMOutputDevice, OutputDevice, Device
     from gpiozero.pins.lgpio import LGPIOFactory
     _GPIO_AVAILABLE = True
 except ImportError:
     _GPIO_AVAILABLE = False
+
+try:
+    import lgpio
+    _LGPIO_AVAILABLE = True
+except ImportError:
+    _LGPIO_AVAILABLE = False
 
 
 def _detect_gpio_chip():
@@ -66,11 +73,16 @@ class WhisplayBoard:
         self._current_g = 0
         self._current_b = 0
 
-        self.button = Button(btn_bcm, pull_up=None, active_state=True, bounce_time=0.05)
         self.button_press_callback = None
         self.button_release_callback = None
-        self.button.when_pressed = self._button_press_event
-        self.button.when_released = self._button_release_event
+        self._btn_pin = btn_bcm
+        self._btn_chip = chip
+        self._btn_handle = lgpio.gpiochip_open(chip)
+        lgpio.gpio_claim_input(self._btn_handle, btn_bcm)
+        self._btn_last_state = lgpio.gpio_read(self._btn_handle, btn_bcm)
+        self._btn_running = True
+        self._btn_thread = threading.Thread(target=self._button_poll_loop, daemon=True)
+        self._btn_thread.start()
 
         self.spi = spidev.SpiDev()
         self.spi.open(0, 0)
@@ -239,8 +251,23 @@ class WhisplayBoard:
             )
             time.sleep(delay)
 
+    def _button_poll_loop(self):
+        while self._btn_running:
+            state = lgpio.gpio_read(self._btn_handle, self._btn_pin)
+            if state != self._btn_last_state:
+                self._btn_last_state = state
+                if state == 1:
+                    print("[Button] PRESSED")
+                    if self.button_press_callback:
+                        self.button_press_callback()
+                else:
+                    print("[Button] RELEASED")
+                    if self.button_release_callback:
+                        self.button_release_callback()
+            time.sleep(0.02)
+
     def button_pressed(self):
-        return self.button.is_pressed
+        return lgpio.gpio_read(self._btn_handle, self._btn_pin) == 1
 
     def on_button_press(self, callback):
         self.button_press_callback = callback
@@ -248,15 +275,8 @@ class WhisplayBoard:
     def on_button_release(self, callback):
         self.button_release_callback = callback
 
-    def _button_press_event(self):
-        if self.button_press_callback:
-            self.button_press_callback()
-
-    def _button_release_event(self):
-        if self.button_release_callback:
-            self.button_release_callback()
-
     def cleanup(self):
+        self._btn_running = False
         self.spi.close()
         self.red_pwm.close()
         self.green_pwm.close()
@@ -264,4 +284,4 @@ class WhisplayBoard:
         self.backlight.close()
         self.dc.close()
         self.rst.close()
-        self.button.close()
+        lgpio.gpiochip_close(self._btn_handle)
