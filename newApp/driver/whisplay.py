@@ -258,12 +258,22 @@ class WhisplayBoard:
                 self._btn_last_state = state
                 if state == 1:
                     print("[Button] PRESSED")
-                    if self.button_press_callback:
-                        self.button_press_callback()
+                    cb = self.button_press_callback
+                    if cb:
+                        try:
+                            cb()
+                        except Exception as e:
+                            print(f"[Button] Press callback error: {e}")
                 else:
                     print("[Button] RELEASED")
-                    if self.button_release_callback:
-                        self.button_release_callback()
+                    cb = self.button_release_callback
+                    if cb:
+                        try:
+                            cb()
+                        except Exception as e:
+                            print(f"[Button] Release callback error: {e}")
+                    else:
+                        print("[Button] No release callback registered!")
             time.sleep(0.02)
 
     def button_pressed(self):
