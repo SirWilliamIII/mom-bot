@@ -20,13 +20,40 @@ def _force_kill_audio():
             pass
 
 
+def _kill_previous_instance():
+    """Kill any previous Python process using main.py to free GPIO pins.
+
+    GPIO pins (via lgpio/gpiozero) are held at the kernel level per-process.
+    If a previous run crashed or was killed without cleanup, the only way
+    to free the pins is to kill that process.
+    """
+    my_pid = os.getpid()
+    # Match both new app (main.py) and old app (chatbot-ui.py)
+    for pattern in ("python.*main\\.py", "python.*chatbot-ui\\.py"):
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", pattern],
+                capture_output=True, text=True, timeout=3,
+            )
+            for line in result.stdout.strip().split("\n"):
+                pid = line.strip()
+                if pid and int(pid) != my_pid:
+                    print(f"[Cleanup] Killing previous instance (PID {pid})")
+                    subprocess.run(["kill", "-9", pid],
+                                   capture_output=True, timeout=2)
+                    time.sleep(0.5)
+        except Exception:
+            pass
+
+
 def main():
     if not Config.validate():
         print("Configuration errors found. Please check your .env file.")
         print("Copy env.template to .env and fill in your API keys.")
         sys.exit(1)
 
-    # Kill any orphaned audio processes from a previous crash
+    # Kill any previous instance (frees GPIO) + orphaned audio processes
+    _kill_previous_instance()
     _force_kill_audio()
 
     try:
