@@ -1,7 +1,8 @@
-"""Whisplay HAT driver using RPi.GPIO.
+"""Whisplay HAT driver (RPi.GPIO API via rpi-lgpio).
 
-Matches the official Whisplay example driver (RPi.GPIO + spidev).
 Uses BOARD pin numbering. Provides LCD, RGB LED, backlight, and button.
+rpi-lgpio provides the RPi.GPIO API backed by lgpio — edge detection
+works reliably on Bookworm kernels where stock RPi.GPIO does not.
 """
 
 import time
@@ -32,16 +33,8 @@ class WhisplayBoard:
     def __init__(self):
         if not _GPIO_AVAILABLE:
             raise RuntimeError(
-                "RPi.GPIO not available. Install with: pip install RPi.GPIO"
+                "RPi.GPIO not available. Install with: pip install rpi-lgpio"
             )
-
-        # Clean up any leftover GPIO state from a previous crashed run.
-        # This clears edge detection registrations that survive process death.
-        try:
-            GPIO.setmode(GPIO.BOARD)
-            GPIO.cleanup()
-        except Exception:
-            pass
 
         GPIO.setmode(GPIO.BOARD)
         GPIO.setwarnings(False)
@@ -69,18 +62,10 @@ class WhisplayBoard:
         self.button_press_callback = None
         self.button_release_callback = None
         GPIO.setup(self.BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        try:
-            GPIO.add_event_detect(
-                self.BUTTON_PIN, GPIO.BOTH,
-                callback=self._button_event, bouncetime=50,
-            )
-        except RuntimeError:
-            # Edge detection already registered — remove and retry
-            GPIO.remove_event_detect(self.BUTTON_PIN)
-            GPIO.add_event_detect(
-                self.BUTTON_PIN, GPIO.BOTH,
-                callback=self._button_event, bouncetime=50,
-            )
+        GPIO.add_event_detect(
+            self.BUTTON_PIN, GPIO.BOTH,
+            callback=self._button_event, bouncetime=50,
+        )
 
         # SPI for LCD
         self.spi = spidev.SpiDev()
@@ -94,7 +79,7 @@ class WhisplayBoard:
         self._reset_lcd()
         self._init_display()
         self.fill_screen(0)
-        print(f"[GPIO] Initialized with RPi.GPIO (BOARD mode)")
+        print(f"[GPIO] Initialized with rpi-lgpio (BOARD mode)")
 
     def _detect_hardware_version(self):
         try:
