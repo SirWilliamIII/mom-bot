@@ -260,18 +260,12 @@ class WhisplayBoard:
                     print("[Button] PRESSED")
                     cb = self.button_press_callback
                     if cb:
-                        try:
-                            cb()
-                        except Exception as e:
-                            print(f"[Button] Press callback error: {e}")
+                        threading.Thread(target=cb, daemon=True).start()
                 else:
                     print("[Button] RELEASED")
                     cb = self.button_release_callback
                     if cb:
-                        try:
-                            cb()
-                        except Exception as e:
-                            print(f"[Button] Release callback error: {e}")
+                        threading.Thread(target=cb, daemon=True).start()
                     else:
                         print("[Button] No release callback registered!")
             time.sleep(0.02)
