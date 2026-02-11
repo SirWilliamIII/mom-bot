@@ -1,33 +1,18 @@
-import os
+"""Whisplay HAT driver using RPi.GPIO.
+
+Matches the official Whisplay example driver (RPi.GPIO + spidev).
+Uses BOARD pin numbering. Provides LCD, RGB LED, backlight, and button.
+"""
+
 import time
 import threading
 import spidev
 
 try:
-    from gpiozero import PWMOutputDevice, OutputDevice, Device
-    from gpiozero.pins.lgpio import LGPIOFactory
+    import RPi.GPIO as GPIO
     _GPIO_AVAILABLE = True
 except ImportError:
     _GPIO_AVAILABLE = False
-
-try:
-    import lgpio
-    _LGPIO_AVAILABLE = True
-except ImportError:
-    _LGPIO_AVAILABLE = False
-
-
-def _detect_gpio_chip():
-    if os.path.exists("/dev/gpiochip4"):
-        return 4
-    return 0
-
-BOARD_TO_BCM = {
-    3: 2, 5: 3, 7: 4, 8: 14, 10: 15, 11: 17, 12: 18,
-    13: 27, 15: 22, 16: 23, 18: 24, 19: 10, 21: 9,
-    22: 25, 23: 11, 24: 8, 26: 7, 29: 5, 31: 6,
-    32: 12, 33: 13, 35: 19, 36: 16, 37: 26, 38: 20, 40: 21,
-}
 
 
 class WhisplayBoard:
@@ -35,55 +20,53 @@ class WhisplayBoard:
     LCD_HEIGHT = 280
     CornerHeight = 20
 
-    DC_PIN_BOARD = 13
-    RST_PIN_BOARD = 7
-    LED_PIN_BOARD = 15
-    RED_PIN_BOARD = 22
-    GREEN_PIN_BOARD = 18
-    BLUE_PIN_BOARD = 16
-    BUTTON_PIN_BOARD = 11
+    # All pins in BOARD numbering (physical header position)
+    DC_PIN = 13
+    RST_PIN = 7
+    LED_PIN = 15
+    RED_PIN = 22
+    GREEN_PIN = 18
+    BLUE_PIN = 16
+    BUTTON_PIN = 11
 
     def __init__(self):
-        dc_bcm = BOARD_TO_BCM[self.DC_PIN_BOARD]
-        rst_bcm = BOARD_TO_BCM[self.RST_PIN_BOARD]
-        led_bcm = BOARD_TO_BCM[self.LED_PIN_BOARD]
-        red_bcm = BOARD_TO_BCM[self.RED_PIN_BOARD]
-        green_bcm = BOARD_TO_BCM[self.GREEN_PIN_BOARD]
-        blue_bcm = BOARD_TO_BCM[self.BLUE_PIN_BOARD]
-        btn_bcm = BOARD_TO_BCM[self.BUTTON_PIN_BOARD]
-
         if not _GPIO_AVAILABLE:
             raise RuntimeError(
-                "gpiozero not available. Install with: pip install gpiozero rpi-lgpio"
+                "RPi.GPIO not available. Install with: pip install RPi.GPIO"
             )
 
-        chip = _detect_gpio_chip()
-        Device.pin_factory = LGPIOFactory(chip=chip)
-        print(f"[GPIO] Using gpiochip{chip}")
+        GPIO.setmode(GPIO.BOARD)
+        GPIO.setwarnings(False)
 
-        self.dc = OutputDevice(dc_bcm)
-        self.rst = OutputDevice(rst_bcm)
+        # LCD control pins
+        GPIO.setup([self.DC_PIN, self.RST_PIN, self.LED_PIN], GPIO.OUT)
+        GPIO.output(self.LED_PIN, GPIO.LOW)
 
-        self.backlight = PWMOutputDevice(led_bcm, frequency=1000, initial_value=0)
-
-        self.red_pwm = PWMOutputDevice(red_bcm, frequency=100, initial_value=1)
-        self.green_pwm = PWMOutputDevice(green_bcm, frequency=100, initial_value=1)
-        self.blue_pwm = PWMOutputDevice(blue_bcm, frequency=100, initial_value=1)
+        # RGB LED (common-anode, so 100% duty = off)
+        GPIO.setup([self.RED_PIN, self.GREEN_PIN, self.BLUE_PIN], GPIO.OUT)
+        self.red_pwm = GPIO.PWM(self.RED_PIN, 100)
+        self.green_pwm = GPIO.PWM(self.GREEN_PIN, 100)
+        self.blue_pwm = GPIO.PWM(self.BLUE_PIN, 100)
+        self.red_pwm.start(100)    # off
+        self.green_pwm.start(100)  # off
+        self.blue_pwm.start(100)   # off
         self._current_r = 0
         self._current_g = 0
         self._current_b = 0
 
+        # Backlight PWM (created lazily in set_backlight for PWM mode)
+        self.backlight_pwm = None
+
+        # Button with edge detection
         self.button_press_callback = None
         self.button_release_callback = None
-        self._btn_pin = btn_bcm
-        self._btn_chip = chip
-        self._btn_handle = lgpio.gpiochip_open(chip)
-        lgpio.gpio_claim_input(self._btn_handle, btn_bcm)
-        self._btn_last_state = lgpio.gpio_read(self._btn_handle, btn_bcm)
-        self._btn_running = True
-        self._btn_thread = threading.Thread(target=self._button_poll_loop, daemon=True)
-        self._btn_thread.start()
+        GPIO.setup(self.BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        GPIO.add_event_detect(
+            self.BUTTON_PIN, GPIO.BOTH,
+            callback=self._button_event, bouncetime=50,
+        )
 
+        # SPI for LCD
         self.spi = spidev.SpiDev()
         self.spi.open(0, 0)
         self.spi.max_speed_hz = 100_000_000
@@ -95,6 +78,7 @@ class WhisplayBoard:
         self._reset_lcd()
         self._init_display()
         self.fill_screen(0)
+        print(f"[GPIO] Initialized with RPi.GPIO (BOARD mode)")
 
     def _detect_hardware_version(self):
         try:
@@ -117,20 +101,23 @@ class WhisplayBoard:
 
     def set_backlight(self, brightness):
         if self.backlight_mode:
+            if self.backlight_pwm is None:
+                self.backlight_pwm = GPIO.PWM(self.LED_PIN, 1000)
+                self.backlight_pwm.start(100)
             if 0 <= brightness <= 100:
-                self.backlight.value = (100 - brightness) / 100.0
+                self.backlight_pwm.ChangeDutyCycle(100 - brightness)
         else:
             if brightness == 0:
-                self.backlight.value = 1
+                GPIO.output(self.LED_PIN, GPIO.HIGH)
             else:
-                self.backlight.value = 0
+                GPIO.output(self.LED_PIN, GPIO.LOW)
 
     def _reset_lcd(self):
-        self.rst.on()
+        GPIO.output(self.RST_PIN, GPIO.HIGH)
         time.sleep(0.1)
-        self.rst.off()
+        GPIO.output(self.RST_PIN, GPIO.LOW)
         time.sleep(0.1)
-        self.rst.on()
+        GPIO.output(self.RST_PIN, GPIO.HIGH)
         time.sleep(0.12)
 
     def _init_display(self):
@@ -160,14 +147,14 @@ class WhisplayBoard:
         self._send_command(0x29)
 
     def _send_command(self, cmd, *args):
-        self.dc.off()
+        GPIO.output(self.DC_PIN, GPIO.LOW)
         self.spi.xfer2([cmd])
         if args:
-            self.dc.on()
+            GPIO.output(self.DC_PIN, GPIO.HIGH)
             self._send_data(list(args))
 
     def _send_data(self, data):
-        self.dc.on()
+        GPIO.output(self.DC_PIN, GPIO.HIGH)
         try:
             self.spi.writebytes2(data)
         except AttributeError:
@@ -230,9 +217,10 @@ class WhisplayBoard:
         self._send_data(pixel_data)
 
     def set_rgb(self, r, g, b):
-        self.red_pwm.value = 1.0 - (r / 255.0)
-        self.green_pwm.value = 1.0 - (g / 255.0)
-        self.blue_pwm.value = 1.0 - (b / 255.0)
+        # Common-anode: 100% duty = LED off, 0% = full brightness
+        self.red_pwm.ChangeDutyCycle(100 - (r / 255.0 * 100))
+        self.green_pwm.ChangeDutyCycle(100 - (g / 255.0 * 100))
+        self.blue_pwm.ChangeDutyCycle(100 - (b / 255.0 * 100))
         self._current_r = r
         self._current_g = g
         self._current_b = b
@@ -251,27 +239,21 @@ class WhisplayBoard:
             )
             time.sleep(delay)
 
-    def _button_poll_loop(self):
-        while self._btn_running:
-            state = lgpio.gpio_read(self._btn_handle, self._btn_pin)
-            if state != self._btn_last_state:
-                self._btn_last_state = state
-                if state == 1:
-                    print("[Button] PRESSED")
-                    cb = self.button_press_callback
-                    if cb:
-                        threading.Thread(target=cb, daemon=True).start()
-                else:
-                    print("[Button] RELEASED")
-                    cb = self.button_release_callback
-                    if cb:
-                        threading.Thread(target=cb, daemon=True).start()
-                    else:
-                        print("[Button] No release callback registered!")
-            time.sleep(0.02)
+    def _button_event(self, channel):
+        """GPIO edge callback — both press and release."""
+        if GPIO.input(channel):
+            # Rising edge = button pressed (5V)
+            cb = self.button_press_callback
+            if cb:
+                threading.Thread(target=cb, daemon=True).start()
+        else:
+            # Falling edge = button released (0V)
+            cb = self.button_release_callback
+            if cb:
+                threading.Thread(target=cb, daemon=True).start()
 
     def button_pressed(self):
-        return lgpio.gpio_read(self._btn_handle, self._btn_pin) == 1
+        return GPIO.input(self.BUTTON_PIN) == 1
 
     def on_button_press(self, callback):
         self.button_press_callback = callback
@@ -280,12 +262,10 @@ class WhisplayBoard:
         self.button_release_callback = callback
 
     def cleanup(self):
-        self._btn_running = False
+        if self.backlight_pwm is not None:
+            self.backlight_pwm.stop()
         self.spi.close()
-        self.red_pwm.close()
-        self.green_pwm.close()
-        self.blue_pwm.close()
-        self.backlight.close()
-        self.dc.close()
-        self.rst.close()
-        lgpio.gpiochip_close(self._btn_handle)
+        self.red_pwm.stop()
+        self.green_pwm.stop()
+        self.blue_pwm.stop()
+        GPIO.cleanup()

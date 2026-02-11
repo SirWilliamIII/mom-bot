@@ -27,7 +27,7 @@ source .venv/bin/activate
 
 echo "[4/6] Installing Python packages..."
 pip install --upgrade pip
-pip install gpiozero rpi-lgpio
+pip install RPi.GPIO
 pip install openai google-generativeai
 pip install python-dotenv cairosvg pygame Pillow numpy
 pip install websockets duckduckgo_search
