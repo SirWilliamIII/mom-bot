@@ -61,10 +61,10 @@ class RenderThread(threading.Thread):
         time.sleep(0.5)
 
         try:
-            self.main_font = ImageFont.truetype(self.font_path, 20)
-            self.status_font = ImageFont.truetype(self.font_path, 24)
-            self.emoji_font = ImageFont.truetype(self.font_path, 40)
-            self.battery_font = ImageFont.truetype(self.font_path, 13)
+            self.main_font = ImageFont.truetype(self.font_path, 28)
+            self.status_font = ImageFont.truetype(self.font_path, 28)
+            self.emoji_font = ImageFont.truetype(self.font_path, 44)
+            self.battery_font = ImageFont.truetype(self.font_path, 14)
         except Exception:
             self.main_font = ImageFont.load_default()
             self.status_font = self.main_font
