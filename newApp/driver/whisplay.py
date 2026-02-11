@@ -35,6 +35,14 @@ class WhisplayBoard:
                 "RPi.GPIO not available. Install with: pip install RPi.GPIO"
             )
 
+        # Clean up any leftover GPIO state from a previous crashed run.
+        # This clears edge detection registrations that survive process death.
+        try:
+            GPIO.setmode(GPIO.BOARD)
+            GPIO.cleanup()
+        except Exception:
+            pass
+
         GPIO.setmode(GPIO.BOARD)
         GPIO.setwarnings(False)
 
@@ -61,10 +69,18 @@ class WhisplayBoard:
         self.button_press_callback = None
         self.button_release_callback = None
         GPIO.setup(self.BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        GPIO.add_event_detect(
-            self.BUTTON_PIN, GPIO.BOTH,
-            callback=self._button_event, bouncetime=50,
-        )
+        try:
+            GPIO.add_event_detect(
+                self.BUTTON_PIN, GPIO.BOTH,
+                callback=self._button_event, bouncetime=50,
+            )
+        except RuntimeError:
+            # Edge detection already registered — remove and retry
+            GPIO.remove_event_detect(self.BUTTON_PIN)
+            GPIO.add_event_detect(
+                self.BUTTON_PIN, GPIO.BOTH,
+                callback=self._button_event, bouncetime=50,
+            )
 
         # SPI for LCD
         self.spi = spidev.SpiDev()
