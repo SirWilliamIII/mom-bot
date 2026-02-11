@@ -99,9 +99,20 @@ def start_playback_stream(sample_rate=16000):
         "aplay", "-D", f"plughw:{card}",
         "-r", str(sample_rate), "-f", "S16_LE", "-c", "1",
         "-t", "raw",
+        "--buffer-time=100000",  # 100ms buffer for low-latency piped playback
     ]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print(f"[Audio] Starting playback stream: {' '.join(cmd)}")
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     _track_playback(proc)
+
+    # Check it didn't die immediately
+    import time
+    time.sleep(0.1)
+    if proc.poll() is not None:
+        stderr_out = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+        print(f"[Audio] WARNING: aplay exited immediately! rc={proc.returncode} stderr={stderr_out}")
+    else:
+        print(f"[Audio] Playback stream started ({sample_rate}Hz)")
     return proc
 
 

@@ -19,7 +19,8 @@ from services.audio import (
 )
 
 AGENT_WS_URL = "wss://agent.deepgram.com/v1/agent/converse"
-MIC_CHUNK_BYTES = 1600  # 50ms of 16kHz 16-bit mono = 1600 bytes
+# 50ms of 16kHz 16-bit mono = 1600 bytes (2 bytes/sample * 16000 * 0.05)
+MIC_CHUNK_BYTES = 1600
 
 
 class VoiceAgent:
@@ -40,6 +41,8 @@ class VoiceAgent:
         self._running = False
         self._ready = threading.Event()
         self._state_machine = None  # set by state machine for tool calls
+        self._audio_bytes_received = 0
+        self._audio_bytes_written = 0
 
     @property
     def is_running(self):
@@ -57,6 +60,8 @@ class VoiceAgent:
 
         self._running = True
         self._ready.clear()
+        self._audio_bytes_received = 0
+        self._audio_bytes_written = 0
 
         headers = {"Authorization": f"Token {Config.DEEPGRAM_API_KEY}"}
 
@@ -90,16 +95,19 @@ class VoiceAgent:
             self.disconnect()
             return
 
-        # Start mic streaming
-        sample_rate = Config.DEEPGRAM_TTS_SAMPLE_RATE
-        self._mic_proc = start_recording_stream(sample_rate=sample_rate)
+        # Start mic streaming (input rate for STT)
+        self._mic_proc = start_recording_stream(
+            sample_rate=Config.DEEPGRAM_INPUT_SAMPLE_RATE
+        )
         self._sender_thread = threading.Thread(
             target=self._send_loop, daemon=True
         )
         self._sender_thread.start()
 
-        # Start speaker (aplay waiting for stdin)
-        self._speaker_proc = start_playback_stream(sample_rate=sample_rate)
+        # Start speaker (output rate for TTS)
+        self._speaker_proc = start_playback_stream(
+            sample_rate=Config.DEEPGRAM_TTS_SAMPLE_RATE
+        )
 
         print("[VoiceAgent] Connected and streaming!")
         self._on_event("connected", {})
@@ -224,16 +232,43 @@ class VoiceAgent:
 
     def _handle_audio(self, data):
         """Write audio bytes to the aplay stdin pipe."""
-        if self._speaker_proc and self._speaker_proc.poll() is None:
-            try:
-                self._speaker_proc.stdin.write(data)
-                self._speaker_proc.stdin.flush()
-            except (BrokenPipeError, OSError):
-                # Speaker died, restart it
-                print("[VoiceAgent] Speaker pipe broken, restarting...")
-                self._speaker_proc = start_playback_stream(
-                    sample_rate=Config.DEEPGRAM_TTS_SAMPLE_RATE
-                )
+        self._audio_bytes_received += len(data)
+
+        # Log first chunk and periodically
+        if self._audio_bytes_received == len(data):
+            print(f"[VoiceAgent] First audio chunk received: {len(data)} bytes")
+        elif self._audio_bytes_received % 32000 < len(data):
+            print(f"[VoiceAgent] Audio: {self._audio_bytes_received} bytes received, "
+                  f"{self._audio_bytes_written} written")
+
+        if not self._speaker_proc:
+            print("[VoiceAgent] No speaker process! Restarting...")
+            self._speaker_proc = start_playback_stream(
+                sample_rate=Config.DEEPGRAM_TTS_SAMPLE_RATE
+            )
+
+        if self._speaker_proc.poll() is not None:
+            # Process died — check why
+            stderr_out = ""
+            if self._speaker_proc.stderr:
+                try:
+                    stderr_out = self._speaker_proc.stderr.read().decode(errors="replace")
+                except Exception:
+                    pass
+            print(f"[VoiceAgent] Speaker died (rc={self._speaker_proc.returncode}): {stderr_out}")
+            self._speaker_proc = start_playback_stream(
+                sample_rate=Config.DEEPGRAM_TTS_SAMPLE_RATE
+            )
+
+        try:
+            self._speaker_proc.stdin.write(data)
+            self._speaker_proc.stdin.flush()
+            self._audio_bytes_written += len(data)
+        except (BrokenPipeError, OSError) as e:
+            print(f"[VoiceAgent] Speaker pipe error: {e}, restarting...")
+            self._speaker_proc = start_playback_stream(
+                sample_rate=Config.DEEPGRAM_TTS_SAMPLE_RATE
+            )
 
     def _handle_message(self, data):
         """Dispatch a JSON event from the Voice Agent."""
@@ -352,7 +387,7 @@ class VoiceAgent:
             "audio": {
                 "input": {
                     "encoding": "linear16",
-                    "sample_rate": Config.DEEPGRAM_TTS_SAMPLE_RATE,
+                    "sample_rate": Config.DEEPGRAM_INPUT_SAMPLE_RATE,
                 },
                 "output": {
                     "encoding": "linear16",

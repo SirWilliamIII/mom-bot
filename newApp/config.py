@@ -26,6 +26,7 @@ class Config:
     DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
     DEEPGRAM_STT_MODEL = os.getenv("DEEPGRAM_STT_MODEL", "nova-3")
     DEEPGRAM_TTS_MODEL = os.getenv("DEEPGRAM_TTS_MODEL", "aura-2-thalia-en")
+    DEEPGRAM_INPUT_SAMPLE_RATE = int(os.getenv("DEEPGRAM_INPUT_SAMPLE_RATE", "16000"))
     DEEPGRAM_TTS_SAMPLE_RATE = int(os.getenv("DEEPGRAM_TTS_SAMPLE_RATE", "16000"))
     DEEPGRAM_LLM_PROVIDER = os.getenv("DEEPGRAM_LLM_PROVIDER", "open_ai")
     DEEPGRAM_LLM_MODEL = os.getenv("DEEPGRAM_LLM_MODEL", "gpt-4o-mini")
