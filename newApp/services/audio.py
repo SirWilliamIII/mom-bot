@@ -51,7 +51,7 @@ def start_recording(output_path):
         card = Config.SOUND_CARD_NAME
         cmd = [
             "arecord", "-D", f"plughw:{card}",
-            "-f", "S32_LE", "-r", "16000", "-c", "1",
+            "-f", "S16_LE", "-r", "16000", "-c", "1",
             output_path,
         ]
         _recording_process = subprocess.Popen(
