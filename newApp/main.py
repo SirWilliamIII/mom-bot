@@ -1,4 +1,6 @@
+import os
 import signal
+import subprocess
 import sys
 import time
 import threading
@@ -8,11 +10,24 @@ from core.state_machine import create_state_machine
 from ui.renderer import RenderThread
 
 
+def _force_kill_audio():
+    """Kill any lingering arecord/aplay processes."""
+    for proc_name in ("arecord", "aplay"):
+        try:
+            subprocess.run(["pkill", "-9", "-f", proc_name],
+                           capture_output=True, timeout=2)
+        except Exception:
+            pass
+
+
 def main():
     if not Config.validate():
         print("Configuration errors found. Please check your .env file.")
         print("Copy env.template to .env and fill in your API keys.")
         sys.exit(1)
+
+    # Kill any orphaned audio processes from a previous crash
+    _force_kill_audio()
 
     try:
         from driver.whisplay import WhisplayBoard
@@ -35,14 +50,25 @@ def main():
 
     def cleanup(signum=None, frame=None):
         print("\n[System] Shutting down...")
-        sm.stop()
-        if render_thread:
-            render_thread.stop()
-        if board:
-            board.set_rgb(0, 0, 0)
-            board.set_backlight(0)
-            board.cleanup()
-        sys.exit(0)
+        try:
+            sm.stop()
+        except Exception:
+            pass
+        try:
+            if render_thread:
+                render_thread.stop()
+        except Exception:
+            pass
+        try:
+            if board:
+                board.set_rgb(0, 0, 0)
+                board.set_backlight(0)
+                board.cleanup()
+        except Exception:
+            pass
+        _force_kill_audio()
+        # Force exit -- don't let daemon threads hang the process
+        os._exit(0)
 
     signal.signal(signal.SIGTERM, cleanup)
     signal.signal(signal.SIGINT, cleanup)
