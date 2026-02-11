@@ -41,7 +41,13 @@ def set_capture_volume(percent=100):
 def start_recording(output_path):
     global _recording_process
     with _recording_lock:
-        stop_recording()
+        if _recording_process and _recording_process.poll() is None:
+            _recording_process.terminate()
+            try:
+                _recording_process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                _recording_process.kill()
+            _recording_process = None
         card = Config.SOUND_CARD_NAME
         cmd = [
             "arecord", "-D", f"hw:{card}",
@@ -51,6 +57,7 @@ def start_recording(output_path):
         _recording_process = subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
+        print(f"[Audio] Recording started: {output_path}")
         return _recording_process
 
 
@@ -63,6 +70,7 @@ def stop_recording():
                 _recording_process.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 _recording_process.kill()
+            print("[Audio] Recording stopped")
         _recording_process = None
 
 
