@@ -30,6 +30,7 @@ pip install --upgrade pip
 pip install gpiozero rpi-lgpio
 pip install openai google-generativeai
 pip install python-dotenv cairosvg pygame Pillow numpy
+pip install websockets duckduckgo_search
 
 echo "[5/5] Setting up configuration..."
 if [ ! -f .env ]; then

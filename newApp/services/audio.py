@@ -1,7 +1,6 @@
 import subprocess
 import os
 import threading
-import time
 
 import pygame
 
@@ -12,6 +11,8 @@ pygame.mixer.init()
 
 _recording_process = None
 _recording_lock = threading.Lock()
+_active_playback = []
+_playback_lock = threading.Lock()
 
 
 def set_volume(percent):
@@ -37,6 +38,8 @@ def set_capture_volume(percent=100):
     except FileNotFoundError:
         pass
 
+
+# --- File-based recording (legacy mode) ---
 
 def start_recording(output_path):
     global _recording_process
@@ -74,6 +77,41 @@ def stop_recording():
         _recording_process = None
 
 
+# --- Streaming audio (Voice Agent mode) ---
+
+def start_recording_stream(sample_rate=16000):
+    """Start arecord returning subprocess -- read raw PCM from stdout."""
+    card = Config.SOUND_CARD_NAME
+    cmd = [
+        "arecord", "-D", f"plughw:{card}",
+        "-f", "S16_LE", "-r", str(sample_rate), "-c", "1",
+        "-t", "raw",
+    ]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    print(f"[Audio] Streaming recording started ({sample_rate}Hz)")
+    return proc
+
+
+def start_playback_stream(sample_rate=16000):
+    """Start aplay returning subprocess -- write raw PCM to stdin."""
+    card = Config.SOUND_CARD_NAME
+    cmd = [
+        "aplay", "-D", f"plughw:{card}",
+        "-r", str(sample_rate), "-f", "S16_LE", "-c", "1",
+        "-t", "raw",
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _track_playback(proc)
+    return proc
+
+
+def _track_playback(proc):
+    with _playback_lock:
+        _active_playback.append(proc)
+
+
+# --- File-based playback ---
+
 def play_audio_file(file_path, blocking=False):
     if not os.path.exists(file_path):
         print(f"[Audio] File not found: {file_path}")
@@ -99,7 +137,9 @@ def play_audio_file(file_path, blocking=False):
     if blocking:
         subprocess.run(cmd, capture_output=True)
     else:
-        return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _track_playback(proc)
+        return proc
 
 
 def play_audio_bytes(audio_bytes, format_hint="wav"):
@@ -109,7 +149,24 @@ def play_audio_bytes(audio_bytes, format_hint="wav"):
     play_audio_file(tmp_path, blocking=True)
 
 
+# --- Playback control ---
+
 def stop_playback():
+    """Kill all active playback (aplay subprocesses + pygame mixer)."""
+    with _playback_lock:
+        for proc in _active_playback:
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+        _active_playback.clear()
+
+    try:
+        subprocess.run(["pkill", "-f", "aplay"], capture_output=True, timeout=2)
+    except Exception:
+        pass
+
     try:
         pygame.mixer.music.stop()
     except Exception:
@@ -117,6 +174,10 @@ def stop_playback():
 
 
 def is_playing():
+    with _playback_lock:
+        _active_playback[:] = [p for p in _active_playback if p.poll() is None]
+        if _active_playback:
+            return True
     try:
         return pygame.mixer.music.get_busy()
     except Exception:

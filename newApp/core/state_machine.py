@@ -6,14 +6,293 @@ import re
 
 from config import Config
 from core.conversation import Conversation
-from services import stt, llm, tts
-from services.audio import start_recording, stop_recording, set_volume, set_capture_volume
 from ui.renderer import display_state, RenderThread
 from ui.utils import ColorUtils
 
 
-class StateMachine:
+# ---------- VOICE AGENT MODE ----------
+
+class VoiceAgentStateMachine:
+    """State machine for Deepgram Voice Agent mode.
+
+    States:
+        idle    - booting, no connection yet
+        ready   - Voice Agent connected, always listening. Button = slow down.
+        game    - local game running, Voice Agent paused
+        music   - music playing, Voice Agent still active
+    """
+
+    SLOW_DOWN_MESSAGE = (
+        "Oh wait, let me slow down! I think I was going a bit fast there. "
+        "Let me repeat what I just said, but simpler and slower this time."
+    )
+
     def __init__(self, board, render_thread):
+        self.board = board
+        self.render_thread = render_thread
+        self.state = "idle"
+        self.running = True
+        self._active_game = None
+        self._agent = None
+        self._button_press_time = 0
+        self._long_press_timer = None
+
+        from services.audio import set_volume, set_capture_volume
+        set_volume(70)
+        set_capture_volume(100)
+
+        self._set_state("idle")
+
+    def start_agent(self):
+        """Connect the Voice Agent and transition to ready state."""
+        from services.voice_agent import VoiceAgent
+
+        self._update_display(
+            status="waking up",
+            emoji="🐷",
+            text=f"{Config.COMPANION_NAME} is waking up...",
+            rgb=(255, 200, 200),
+            scroll_speed=0,
+        )
+
+        self._agent = VoiceAgent(on_event=self._on_agent_event)
+        self._agent.set_state_machine(self)
+
+        # Connect in a thread so we don't block the main thread
+        def do_connect():
+            self._agent.connect()
+            if self._agent.is_running:
+                self._set_state("ready")
+            else:
+                self._update_display(
+                    text="Couldn't connect. Check WiFi?",
+                    rgb=(255, 0, 0),
+                )
+
+        thread = threading.Thread(target=do_connect, daemon=True)
+        thread.start()
+
+    def stop(self):
+        self.running = False
+        if self._agent:
+            self._agent.disconnect()
+        if self._active_game:
+            self._active_game.stop()
+
+    # --- State management ---
+
+    def _set_state(self, new_state, **kwargs):
+        old = self.state
+        self.state = new_state
+        print(f"[State] {old} -> {new_state}")
+
+        # Clear button handlers
+        if self.board:
+            self.board.on_button_press(None)
+            self.board.on_button_release(None)
+
+        handler = {
+            "idle": self._enter_idle,
+            "ready": self._enter_ready,
+            "game": self._enter_game,
+            "music": self._enter_music,
+        }.get(new_state)
+
+        if handler:
+            handler(**kwargs)
+
+    def _enter_idle(self, **kwargs):
+        text = kwargs.get("text", f"{Config.COMPANION_NAME} is waking up...")
+        self._update_display(
+            status="idle",
+            emoji="🐷",
+            text=text,
+            rgb=(255, 200, 200),
+            scroll_speed=0,
+        )
+
+    def _enter_ready(self, **kwargs):
+        name = Config.COMPANION_NAME
+        self._update_display(
+            status="ready",
+            emoji="🐷",
+            text=kwargs.get("text", f"Talk to {name}!"),
+            rgb=(0, 0, 85),
+            scroll_speed=0,
+        )
+
+        # Button: short press = magic slow-down, long press = reconnect
+        if self.board:
+            self.board.on_button_press(self._on_button_press)
+            self.board.on_button_release(self._on_button_release)
+
+    def _enter_game(self, **kwargs):
+        game = kwargs.get("game")
+        if game:
+            self._active_game = game
+            self._update_display(
+                status="playing",
+                emoji="🎮",
+                rgb=(255, 0, 255),
+            )
+            if self.board:
+                self.board.on_button_press(game.on_button_press)
+                self.board.on_button_release(game.on_button_release)
+            game.start(self)
+
+    def _enter_music(self, **kwargs):
+        self._update_display(
+            status="playing music",
+            emoji="🎵",
+            rgb=(255, 105, 180),
+            scroll_speed=0,
+        )
+        # Button still does slow-down in music mode
+        if self.board:
+            self.board.on_button_press(self._on_button_press)
+            self.board.on_button_release(self._on_button_release)
+
+    def exit_game(self):
+        if self._active_game:
+            self._active_game.stop()
+            self._active_game = None
+        display_state.game_surface = None
+        self._set_state("ready", text="That was fun! Want to play again?")
+
+    # --- Magic slow-down button ---
+
+    def _on_button_press(self):
+        self._button_press_time = time.time()
+        # Schedule long-press check
+        self._long_press_timer = threading.Timer(2.0, self._on_long_press)
+        self._long_press_timer.start()
+
+    def _on_button_release(self):
+        # Cancel long-press timer
+        if self._long_press_timer:
+            self._long_press_timer.cancel()
+            self._long_press_timer = None
+
+        hold_time = time.time() - self._button_press_time
+        if hold_time < 2.0:
+            # Short press = magic slow-down button
+            self._magic_button()
+
+    def _magic_button(self):
+        """The magic slow-down button! Inject a message to make Piglet repeat/simplify."""
+        print("[Button] Magic button pressed! Injecting slow-down message...")
+        self._update_display(
+            text="OK OK, let me try again!",
+            emoji="🐷",
+            rgb=(255, 150, 200),
+        )
+        if self._agent:
+            self._agent.inject_user_message(self.SLOW_DOWN_MESSAGE)
+
+    def _on_long_press(self):
+        """Long press = reconnect the Voice Agent."""
+        print("[Button] Long press detected -- reconnecting...")
+        self._update_display(
+            text="Reconnecting...",
+            emoji="🔄",
+            rgb=(255, 165, 0),
+        )
+        if self._agent:
+            self._agent.disconnect()
+            time.sleep(1)
+            self.start_agent()
+
+    # --- Voice Agent event handler ---
+
+    def _on_agent_event(self, event_type, data):
+        """Called from the Voice Agent receiver thread on WebSocket events."""
+        if event_type == "ready":
+            pass  # start_agent handles the transition
+
+        elif event_type == "connected":
+            pass
+
+        elif event_type == "user_speaking":
+            self._update_display(
+                status="listening",
+                emoji="🎤",
+                text="I'm listening...",
+                rgb=(0, 255, 0),
+            )
+
+        elif event_type == "agent_thinking":
+            self._update_display(
+                status="thinking",
+                emoji="🤔",
+                text="Let me think...",
+                rgb=(255, 165, 0),
+            )
+
+        elif event_type == "agent_speaking":
+            self._update_display(
+                status="talking",
+                rgb=(0, 100, 200),
+            )
+
+        elif event_type == "conversation_text":
+            role = data.get("role", "")
+            content = data.get("content", "")
+            if role == "assistant":
+                emojis = _extract_emojis(content)
+                self._update_display(
+                    text=content,
+                    emoji=emojis or "🐷",
+                    scroll_speed=3,
+                )
+            elif role == "user":
+                self._update_display(text=f"You: {content}")
+
+        elif event_type == "agent_audio_done":
+            if self.state not in ("game", "music"):
+                self._update_display(
+                    status="ready",
+                    rgb=(0, 0, 85),
+                )
+
+        elif event_type == "function_call":
+            name = data.get("name", "")
+            self._update_display(text=f"Doing: {name}...")
+
+        elif event_type == "error":
+            desc = data.get("description", "Something went wrong")
+            self._update_display(
+                text=desc,
+                emoji="😟",
+                rgb=(255, 0, 0),
+            )
+
+        elif event_type == "disconnected":
+            reason = data.get("reason", "")
+            if self.running and reason:
+                # Unexpected disconnect -- try to reconnect
+                print(f"[State] Unexpected disconnect: {reason}, reconnecting...")
+                time.sleep(2)
+                self.start_agent()
+
+    # --- Display helper ---
+
+    def _update_display(self, **kwargs):
+        if "rgb" in kwargs and self.board:
+            r, g, b = kwargs.pop("rgb")
+            self.board.set_rgb(r, g, b)
+            kwargs["rgb_color"] = (r, g, b)
+        display_state.update(**kwargs)
+
+
+# ---------- LEGACY MODE (old batch pipeline) ----------
+
+class LegacyStateMachine:
+    """Original batch-mode state machine (button → record → STT → LLM → TTS)."""
+
+    def __init__(self, board, render_thread):
+        from services import stt, llm, tts
+        from services.audio import start_recording, stop_recording, set_volume, set_capture_volume
+
         self.board = board
         self.render_thread = render_thread
         self.conversation = Conversation()
@@ -30,6 +309,7 @@ class StateMachine:
 
     def stop(self):
         self.running = False
+        from services.audio import stop_recording
         stop_recording()
         if self._active_game:
             self._active_game.stop()
@@ -71,6 +351,7 @@ class StateMachine:
             self.board.on_button_press(lambda: self._set_state("listening"))
 
     def _enter_listening(self, **kwargs):
+        from services.audio import start_recording
         self._answer_id += 1
         self._recording_path = os.path.join(
             tempfile.gettempdir(), f"mombot_rec_{int(time.time())}.wav"
@@ -87,6 +368,7 @@ class StateMachine:
         start_recording(self._recording_path)
 
     def _on_release_from_listening(self):
+        from services.audio import stop_recording
         print("[State] Release detected, stopping recording...")
         stop_recording()
         self._update_display(rgb=(255, 165, 0))
@@ -121,6 +403,7 @@ class StateMachine:
         thread.start()
 
     def _process_voice(self):
+        from services import stt
         current_id = self._answer_id
 
         try:
@@ -146,7 +429,6 @@ class StateMachine:
 
     def _enter_speaking(self, **kwargs):
         answer_id = kwargs.get("answer_id", self._answer_id)
-        user_text = kwargs.get("user_text", "")
 
         self._update_display(
             status="answering",
@@ -172,6 +454,7 @@ class StateMachine:
         self._set_state("listening")
 
     def _generate_and_speak(self, answer_id):
+        from services import llm, tts
         messages = self.conversation.get_messages()
         full_response = ""
         sentence_buffer = ""
@@ -233,6 +516,7 @@ class StateMachine:
 
     def _handle_tool_call(self, name, args, answer_id):
         from features.tools import execute_tool
+        from services import tts
         result = execute_tool(name, args, self)
 
         if result and answer_id == self._answer_id:
@@ -283,6 +567,20 @@ class StateMachine:
             kwargs["rgb_color"] = (r, g, b)
         display_state.update(**kwargs)
 
+
+# ---------- Factory ----------
+
+def create_state_machine(board, render_thread):
+    """Create the appropriate state machine based on config."""
+    if Config.VOICE_AGENT_MODE:
+        print("[State] Using Voice Agent mode (Deepgram)")
+        return VoiceAgentStateMachine(board, render_thread)
+    else:
+        print("[State] Using Legacy mode (batch STT/LLM/TTS)")
+        return LegacyStateMachine(board, render_thread)
+
+
+# ---------- Helpers ----------
 
 def _extract_emojis(text):
     import unicodedata

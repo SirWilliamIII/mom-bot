@@ -4,7 +4,7 @@ import time
 import threading
 
 from config import Config
-from core.state_machine import StateMachine
+from core.state_machine import create_state_machine
 from ui.renderer import RenderThread
 
 
@@ -31,7 +31,7 @@ def main():
         render_thread.start()
         board.set_backlight(100)
 
-    sm = StateMachine(board, render_thread)
+    sm = create_state_machine(board, render_thread)
 
     def cleanup(signum=None, frame=None):
         print("\n[System] Shutting down...")
@@ -46,6 +46,10 @@ def main():
 
     signal.signal(signal.SIGTERM, cleanup)
     signal.signal(signal.SIGINT, cleanup)
+
+    # Start Voice Agent if in that mode
+    if Config.VOICE_AGENT_MODE:
+        sm.start_agent()
 
     try:
         while True:
