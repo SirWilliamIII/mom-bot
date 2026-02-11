@@ -87,16 +87,22 @@ class StateMachine:
         start_recording(self._recording_path)
 
     def _on_release_from_listening(self):
+        print("[State] Release detected, stopping recording...")
         stop_recording()
         self._update_display(rgb=(255, 165, 0))
         time.sleep(0.2)
 
         if os.path.exists(self._recording_path):
             fsize = os.path.getsize(self._recording_path)
+            print(f"[State] Recording file size: {fsize} bytes")
             if fsize < 5000:
                 print("[State] Recording too short, back to idle")
                 self._set_state("idle")
                 return
+        else:
+            print(f"[State] Recording file not found: {self._recording_path}")
+            self._set_state("idle")
+            return
         self._set_state("thinking")
 
     def _enter_thinking(self, **kwargs):
