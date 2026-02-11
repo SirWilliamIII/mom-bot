@@ -27,6 +27,9 @@ class VoiceAgentStateMachine:
         "Let me repeat what I just said, but simpler and slower this time."
     )
 
+    # Minimum seconds between RGB changes to avoid strobe effect
+    _RGB_MIN_INTERVAL = 0.4
+
     def __init__(self, board, render_thread):
         self.board = board
         self.render_thread = render_thread
@@ -36,6 +39,8 @@ class VoiceAgentStateMachine:
         self._agent = None
         self._button_press_time = 0
         self._long_press_timer = None
+        self._current_rgb = None
+        self._last_rgb_time = 0
 
         from services.audio import set_volume, set_capture_volume
         set_volume(70)
@@ -205,20 +210,23 @@ class VoiceAgentStateMachine:
     # --- Voice Agent event handler ---
 
     def _on_agent_event(self, event_type, data):
-        """Called from the Voice Agent receiver thread on WebSocket events."""
-        if event_type == "ready":
+        """Called from the Voice Agent receiver thread on WebSocket events.
+
+        We keep visual updates calm — only change RGB for meaningful
+        state transitions, and avoid rapid text flicker.
+        """
+        if event_type in ("ready", "connected"):
             pass  # start_agent handles the transition
 
-        elif event_type == "connected":
-            pass
-
         elif event_type == "user_speaking":
-            self._update_display(
-                status="listening",
-                emoji="🎤",
-                text="I'm listening...",
-                rgb=(0, 255, 0),
-            )
+            # Only update if we're not already showing "listening"
+            if display_state.status != "listening":
+                self._update_display(
+                    status="listening",
+                    emoji="🎤",
+                    text="I'm listening...",
+                    rgb=(0, 255, 0),
+                )
 
         elif event_type == "agent_thinking":
             self._update_display(
@@ -229,23 +237,25 @@ class VoiceAgentStateMachine:
             )
 
         elif event_type == "agent_speaking":
-            self._update_display(
-                status="talking",
-                rgb=(0, 100, 200),
-            )
+            # Just set status, don't flash the text
+            if display_state.status != "talking":
+                self._update_display(
+                    status="talking",
+                    rgb=(0, 100, 200),
+                )
 
         elif event_type == "conversation_text":
             role = data.get("role", "")
             content = data.get("content", "")
-            if role == "assistant":
+            if role == "assistant" and content:
                 emojis = _extract_emojis(content)
+                # Update text only (no RGB change) to avoid flicker
                 self._update_display(
                     text=content,
                     emoji=emojis or "🐷",
                     scroll_speed=3,
                 )
-            elif role == "user":
-                self._update_display(text=f"You: {content}")
+            # Skip displaying user text — it's noisy with streaming partials
 
         elif event_type == "agent_audio_done":
             if self.state not in ("game", "music"):
@@ -278,9 +288,14 @@ class VoiceAgentStateMachine:
 
     def _update_display(self, **kwargs):
         if "rgb" in kwargs and self.board:
-            r, g, b = kwargs.pop("rgb")
-            self.board.set_rgb(r, g, b)
-            kwargs["rgb_color"] = (r, g, b)
+            rgb = kwargs.pop("rgb")
+            now = time.time()
+            # Only change RGB if it's a different color AND enough time has passed
+            if rgb != self._current_rgb and (now - self._last_rgb_time) >= self._RGB_MIN_INTERVAL:
+                self._current_rgb = rgb
+                self._last_rgb_time = now
+                self.board.set_rgb(*rgb)
+            kwargs["rgb_color"] = rgb
         display_state.update(**kwargs)
 
 

@@ -76,7 +76,7 @@ class VoiceAgent:
         # Send settings
         settings = self._build_settings()
         self._ws.send(json.dumps(settings))
-        print("[VoiceAgent] Settings sent, waiting for SettingsApplied...")
+        print("[VoiceAgent] Settings sent, waiting for ready...")
 
         # Start receiver first so we catch SettingsApplied
         self._receiver_thread = threading.Thread(
@@ -242,8 +242,8 @@ class VoiceAgent:
         if msg_type == "Welcome":
             print(f"[VoiceAgent] Welcome! request_id={data.get('request_id', '?')}")
 
-        elif msg_type == "SettingsApplied":
-            print("[VoiceAgent] Settings applied -- agent ready!")
+        elif msg_type in ("SettingsApplied", "SettingsUpdated"):
+            print(f"[VoiceAgent] {msg_type} -- agent ready!")
             self._ready.set()
             self._on_event("ready", {})
 
@@ -348,7 +348,7 @@ class VoiceAgent:
         greeting = f"{greeting_time}! It's me, {name}! What's on your mind?"
 
         return {
-            "type": "SettingsConfiguration",
+            "type": "Settings",
             "audio": {
                 "input": {
                     "encoding": "linear16",
