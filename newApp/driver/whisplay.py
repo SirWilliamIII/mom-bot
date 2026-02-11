@@ -1,11 +1,19 @@
+import os
 import time
 import spidev
 
 try:
-    from gpiozero import PWMOutputDevice, OutputDevice, Button
+    from gpiozero import PWMOutputDevice, OutputDevice, Button, Device
+    from gpiozero.pins.lgpio import LGPIOFactory
     _GPIO_AVAILABLE = True
 except ImportError:
     _GPIO_AVAILABLE = False
+
+
+def _detect_gpio_chip():
+    if os.path.exists("/dev/gpiochip4"):
+        return 4
+    return 0
 
 BOARD_TO_BCM = {
     3: 2, 5: 3, 7: 4, 8: 14, 10: 15, 11: 17, 12: 18,
@@ -41,6 +49,10 @@ class WhisplayBoard:
             raise RuntimeError(
                 "gpiozero not available. Install with: pip install gpiozero rpi-lgpio"
             )
+
+        chip = _detect_gpio_chip()
+        Device.pin_factory = LGPIOFactory(chip=chip)
+        print(f"[GPIO] Using gpiochip{chip}")
 
         self.dc = OutputDevice(dc_bcm)
         self.rst = OutputDevice(rst_bcm)
