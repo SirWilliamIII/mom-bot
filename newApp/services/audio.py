@@ -45,23 +45,18 @@ def set_capture_volume(percent=100):
 def _capture_device():
     """Return the ALSA capture device name.
 
-    Voice Agent mode uses 'mic' (dsnoop from .asoundrc) to allow
-    simultaneous recording + playback. Legacy mode uses plughw directly
-    since record and play never overlap.
+    plughw: supports full-duplex on the WM8960 — arecord and aplay can
+    both open plughw: concurrently. No dmix/dsnoop/asoundrc needed.
     """
-    if Config.VOICE_AGENT_MODE:
-        return "mic"  # dsnoop via .asoundrc
     return f"plughw:{Config.SOUND_CARD_NAME}"
 
 
 def _playback_device():
     """Return the ALSA playback device name.
 
-    Voice Agent mode uses 'speaker' (dmix from .asoundrc) to allow
-    simultaneous recording + playback. Legacy mode uses plughw directly.
+    plughw: supports full-duplex on the WM8960 — arecord and aplay can
+    both open plughw: concurrently. No dmix/dsnoop/asoundrc needed.
     """
-    if Config.VOICE_AGENT_MODE:
-        return "speaker"  # dmix via .asoundrc
     return f"plughw:{Config.SOUND_CARD_NAME}"
 
 
