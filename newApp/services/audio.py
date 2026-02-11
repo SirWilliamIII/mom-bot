@@ -1,6 +1,7 @@
 import subprocess
 import os
 import threading
+import time
 
 import pygame
 
@@ -39,6 +40,31 @@ def set_capture_volume(percent=100):
         pass
 
 
+# --- ALSA device helpers ---
+
+def _capture_device():
+    """Return the ALSA capture device name.
+
+    Voice Agent mode uses 'mic' (dsnoop from .asoundrc) to allow
+    simultaneous recording + playback. Legacy mode uses plughw directly
+    since record and play never overlap.
+    """
+    if Config.VOICE_AGENT_MODE:
+        return "mic"  # dsnoop via .asoundrc
+    return f"plughw:{Config.SOUND_CARD_NAME}"
+
+
+def _playback_device():
+    """Return the ALSA playback device name.
+
+    Voice Agent mode uses 'speaker' (dmix from .asoundrc) to allow
+    simultaneous recording + playback. Legacy mode uses plughw directly.
+    """
+    if Config.VOICE_AGENT_MODE:
+        return "speaker"  # dmix via .asoundrc
+    return f"plughw:{Config.SOUND_CARD_NAME}"
+
+
 # --- File-based recording (legacy mode) ---
 
 def start_recording(output_path):
@@ -51,9 +77,9 @@ def start_recording(output_path):
             except subprocess.TimeoutExpired:
                 _recording_process.kill()
             _recording_process = None
-        card = Config.SOUND_CARD_NAME
+        device = _capture_device()
         cmd = [
-            "arecord", "-D", f"plughw:{card}",
+            "arecord", "-D", device,
             "-f", "S16_LE", "-r", "16000", "-c", "1",
             output_path,
         ]
@@ -81,38 +107,42 @@ def stop_recording():
 
 def start_recording_stream(sample_rate=16000):
     """Start arecord returning subprocess -- read raw PCM from stdout."""
-    card = Config.SOUND_CARD_NAME
+    device = _capture_device()
     cmd = [
-        "arecord", "-D", f"plughw:{card}",
+        "arecord", "-D", device,
         "-f", "S16_LE", "-r", str(sample_rate), "-c", "1",
         "-t", "raw",
     ]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    print(f"[Audio] Streaming recording started ({sample_rate}Hz)")
+    print(f"[Audio] Mic stream cmd: {' '.join(cmd)}")
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    time.sleep(0.1)
+    if proc.poll() is not None:
+        stderr_out = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+        print(f"[Audio] WARNING: arecord failed! rc={proc.returncode} stderr={stderr_out}")
+    else:
+        print(f"[Audio] Mic stream started ({sample_rate}Hz via {device})")
     return proc
 
 
 def start_playback_stream(sample_rate=16000):
     """Start aplay returning subprocess -- write raw PCM to stdin."""
-    card = Config.SOUND_CARD_NAME
+    device = _playback_device()
     cmd = [
-        "aplay", "-D", f"plughw:{card}",
+        "aplay", "-D", device,
         "-r", str(sample_rate), "-f", "S16_LE", "-c", "1",
         "-t", "raw",
-        "--buffer-time=100000",  # 100ms buffer for low-latency piped playback
     ]
-    print(f"[Audio] Starting playback stream: {' '.join(cmd)}")
+    print(f"[Audio] Speaker stream cmd: {' '.join(cmd)}")
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     _track_playback(proc)
 
     # Check it didn't die immediately
-    import time
     time.sleep(0.1)
     if proc.poll() is not None:
         stderr_out = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
         print(f"[Audio] WARNING: aplay exited immediately! rc={proc.returncode} stderr={stderr_out}")
     else:
-        print(f"[Audio] Playback stream started ({sample_rate}Hz)")
+        print(f"[Audio] Speaker stream started ({sample_rate}Hz via {device})")
     return proc
 
 
@@ -128,7 +158,7 @@ def play_audio_file(file_path, blocking=False):
         print(f"[Audio] File not found: {file_path}")
         return
 
-    card = Config.SOUND_CARD_NAME
+    device = _playback_device()
     ext = os.path.splitext(file_path)[1].lower()
 
     if ext in (".mp3", ".ogg", ".flac"):
@@ -143,7 +173,7 @@ def play_audio_file(file_path, blocking=False):
             print(f"[Audio] ffmpeg convert failed: {e}")
             return
 
-    cmd = ["aplay", "-D", f"plughw:{card}", file_path]
+    cmd = ["aplay", "-D", device, file_path]
     print(f"[Audio] Playing: {file_path}")
     if blocking:
         subprocess.run(cmd, capture_output=True)

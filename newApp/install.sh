@@ -32,7 +32,16 @@ pip install openai google-generativeai
 pip install python-dotenv cairosvg pygame Pillow numpy
 pip install websockets duckduckgo_search
 
-echo "[5/5] Setting up configuration..."
+echo "[5/6] Setting up ALSA for full-duplex audio..."
+if [ ! -f ~/.asoundrc ]; then
+    cp asound.conf ~/.asoundrc
+    echo "[ALSA] Installed ~/.asoundrc for simultaneous mic + speaker"
+else
+    echo "[ALSA] ~/.asoundrc already exists (skipping)"
+    echo "  If audio doesn't work, try: cp $(pwd)/asound.conf ~/.asoundrc"
+fi
+
+echo "[6/6] Setting up configuration..."
 if [ ! -f .env ]; then
     cp env.template .env
     echo ""
