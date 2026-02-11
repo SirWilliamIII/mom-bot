@@ -140,7 +140,7 @@ class TextUtils:
                     img.paste(emoji_img, (x, baseline - emoji_img.height), emoji_img)
                     x += emoji_img.width
             else:
-                d.text((x, 0), char, font=font, fill=(255, 255, 255))
+                d.text((x, 0), char, font=font, fill=(255, 165, 0))
                 x += TextUtils.get_char_size(font, char)[0]
 
         _line_image_cache[key] = img

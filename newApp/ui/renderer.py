@@ -116,7 +116,7 @@ class RenderThread(threading.Thread):
             return
 
         header_h = 98
-        header = Image.new("RGBA", (W, header_h), (0, 0, 0, 255))
+        header = Image.new("RGBA", (W, header_h), (0, 100, 0, 255))
         hd = ImageDraw.Draw(header)
         self._render_header(header, hd, state, W)
         self.board.draw_image(
@@ -125,7 +125,7 @@ class RenderThread(threading.Thread):
         )
 
         text_h = H - header_h
-        text_img = Image.new("RGBA", (W, text_h), (0, 0, 0, 255))
+        text_img = Image.new("RGBA", (W, text_h), (0, 100, 0, 255))
         self._render_text_area(text_img, text_h, state, W)
         self.board.draw_image(
             0, header_h, W, text_h,
