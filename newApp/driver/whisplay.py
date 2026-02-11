@@ -66,7 +66,7 @@ class WhisplayBoard:
         self._current_g = 0
         self._current_b = 0
 
-        self.button = Button(btn_bcm, pull_up=True, bounce_time=0.05)
+        self.button = Button(btn_bcm, pull_up=False, active_state=True, bounce_time=0.05)
         self.button_press_callback = None
         self.button_release_callback = None
         self.button.when_pressed = self._button_press_event
