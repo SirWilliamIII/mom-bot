@@ -1,0 +1,15 @@
+[Unit]
+Description=MomBot Piglet Companion
+After=network.target sound.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/mombot
+ExecStart=/home/pi/mombot/.venv/bin/python /home/pi/mombot/main.py
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

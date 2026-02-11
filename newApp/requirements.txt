@@ -1,0 +1,10 @@
+gpiozero
+rpi-lgpio
+spidev
+Pillow
+numpy
+cairosvg
+pygame
+openai>=1.0.0
+google-generativeai>=0.8.0
+python-dotenv
