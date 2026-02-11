@@ -8,10 +8,10 @@ if [ ! -f /etc/os-release ] || ! grep -qi "raspbian\|debian" /etc/os-release; th
     echo "[WARN] This script is designed for Raspberry Pi OS (Debian-based)."
 fi
 
-echo "[1/5] Updating system packages..."
+echo "[1/6] Updating system packages..."
 sudo apt-get update -qq
 
-echo "[2/5] Installing system dependencies..."
+echo "[2/6] Installing system dependencies..."
 sudo apt-get install -y -qq \
     python3 python3-pip python3-venv \
     python3-spidev python3-numpy python3-pil \
@@ -20,12 +20,12 @@ sudo apt-get install -y -qq \
     fonts-noto-cjk \
     git
 
-echo "[3/5] Creating Python virtual environment..."
+echo "[3/6] Creating Python virtual environment..."
 cd "$(dirname "$0")"
 python3 -m venv .venv --system-site-packages
 source .venv/bin/activate
 
-echo "[4/5] Installing Python packages..."
+echo "[4/6] Installing Python packages..."
 pip install --upgrade pip
 pip install gpiozero rpi-lgpio
 pip install openai google-generativeai

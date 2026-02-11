@@ -318,7 +318,8 @@ class VoiceAgent:
                 "description": desc, "code": code
             })
 
-        elif msg_type in ("PromptUpdated", "SpeakUpdated"):
+        elif msg_type in ("PromptUpdated", "SpeakUpdated", "History"):
+            # History = conversation history replay on reconnect, safe to ignore
             print(f"[VoiceAgent] {msg_type}")
 
         else:
