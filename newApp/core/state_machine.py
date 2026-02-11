@@ -43,6 +43,9 @@ class StateMachine:
             self.board.on_button_press(None)
             self.board.on_button_release(None)
 
+            if new_state == "listening":
+                self.board.on_button_release(self._on_release_from_listening)
+
         handler = {
             "idle": self._enter_idle,
             "listening": self._enter_listening,
@@ -82,9 +85,6 @@ class StateMachine:
         )
 
         start_recording(self._recording_path)
-
-        if self.board:
-            self.board.on_button_release(self._on_release_from_listening)
 
     def _on_release_from_listening(self):
         stop_recording()
