@@ -23,7 +23,7 @@ def main():
         print("[Driver] Running in headless mode (no display/GPIO)")
         board = None
 
-    font_path = Config.CUSTOM_FONT_PATH or "assets/fonts/NotoSansSC-Bold.ttf"
+    font_path = Config.CUSTOM_FONT_PATH or "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
     render_thread = None
     if board:

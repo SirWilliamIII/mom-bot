@@ -79,25 +79,27 @@ def play_audio_file(file_path, blocking=False):
         print(f"[Audio] File not found: {file_path}")
         return
 
+    card = Config.SOUND_CARD_NAME
     ext = os.path.splitext(file_path)[1].lower()
 
-    if ext in (".wav",):
-        card = Config.SOUND_CARD_NAME
-        cmd = ["aplay", "-D", f"plughw:{card}", file_path]
-        if blocking:
-            subprocess.run(cmd, capture_output=True)
-        else:
-            return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    elif ext in (".mp3", ".ogg", ".flac"):
+    if ext in (".mp3", ".ogg", ".flac"):
+        wav_path = file_path + ".wav"
         try:
-            pygame.mixer.music.load(file_path)
-            pygame.mixer.music.play()
-            if blocking:
-                while pygame.mixer.music.get_busy():
-                    time.sleep(0.1)
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", file_path, "-ar", "48000", "-ac", "2", wav_path],
+                capture_output=True, timeout=30,
+            )
+            file_path = wav_path
         except Exception as e:
-            print(f"[Audio] Playback error: {e}")
+            print(f"[Audio] ffmpeg convert failed: {e}")
+            return
+
+    cmd = ["aplay", "-D", f"plughw:{card}", file_path]
+    print(f"[Audio] Playing: {file_path}")
+    if blocking:
+        subprocess.run(cmd, capture_output=True)
+    else:
+        return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def play_audio_bytes(audio_bytes, format_hint="wav"):
