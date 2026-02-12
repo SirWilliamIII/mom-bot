@@ -165,6 +165,34 @@ class VoiceAgentStateMachine:
         display_state.game_surface = None
         self._set_state("ready", text="That was fun! Want to play again?")
 
+    # --- Backlight flash (notification ping) ---
+
+    _flash_lock = threading.Lock()
+    _flash_active = False
+
+    def _flash_backlight(self, times=2, on_ms=80, off_ms=60):
+        """Quick backlight blink so she notices Piglet is talking.
+
+        Runs in a background thread so it doesn't block event handling.
+        Only one flash sequence at a time (skips if already flashing).
+        """
+        if not self.board:
+            return
+        if not self._flash_lock.acquire(blocking=False):
+            return  # already flashing, skip
+        def _do_flash():
+            try:
+                for _ in range(times):
+                    self.board.set_backlight(0)
+                    time.sleep(off_ms / 1000)
+                    self.board.set_backlight(100)
+                    time.sleep(on_ms / 1000)
+            except Exception as e:
+                print(f"[Flash] Error: {e}")
+            finally:
+                self._flash_lock.release()
+        threading.Thread(target=_do_flash, daemon=True).start()
+
     # --- Magic slow-down button ---
 
     def _on_button_press(self):
@@ -249,6 +277,8 @@ class VoiceAgentStateMachine:
             role = data.get("role", "")
             content = data.get("content", "")
             if role == "assistant" and content:
+                # Quick backlight flash so she notices Piglet is responding
+                self._flash_backlight(times=2)
                 emojis = _extract_emojis(content)
                 # Update text only (no RGB change) to avoid flicker
                 self._update_display(
