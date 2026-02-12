@@ -3,6 +3,15 @@ import time
 import threading
 
 from PIL import Image, ImageDraw, ImageFont
+from ui.framework import (
+    Components,
+    Layout,
+    PigletCharacter,
+    ThemeRegistry,
+    alert_color_for_level,
+    hint_for_status,
+    pulse,
+)
 from ui.utils import ColorUtils, ImageUtils, TextUtils
 
 
@@ -11,11 +20,16 @@ class DisplayState:
         self.status = "Hello"
         self.emoji = "🐷"
         self.text = "Press and hold to talk to me!"
+        self.ui_theme = "piglet_candy"
         self.battery_level = 100
         self.battery_color = (85, 255, 0)
         self.rgb_color = (0, 0, 85)
+        self.status_since = time.time()
         self.scroll_top = 0
         self.scroll_speed = 3
+        self.alert_text = ""
+        self.alert_level = "info"
+        self.alert_until = 0.0
         self.image_path = ""
         self.image_obj = None
         self.game_surface = None
@@ -28,9 +42,13 @@ class DisplayState:
                 TextUtils.clear_cache()
             self.text = new_text
         if "status" in kwargs and kwargs["status"] is not None:
+            if kwargs["status"] != self.status:
+                self.status_since = time.time()
             self.status = kwargs["status"]
         if "emoji" in kwargs and kwargs["emoji"] is not None:
             self.emoji = kwargs["emoji"]
+        if "ui_theme" in kwargs and kwargs["ui_theme"] is not None:
+            self.ui_theme = kwargs["ui_theme"]
         if "battery_level" in kwargs and kwargs["battery_level"] is not None:
             self.battery_level = kwargs["battery_level"]
         if "battery_color" in kwargs and kwargs["battery_color"] is not None:
@@ -39,6 +57,13 @@ class DisplayState:
             self.rgb_color = kwargs["rgb_color"]
         if "scroll_speed" in kwargs and kwargs["scroll_speed"] is not None:
             self.scroll_speed = kwargs["scroll_speed"]
+        if "alert_text" in kwargs and kwargs["alert_text"]:
+            self.alert_text = kwargs["alert_text"]
+            self.alert_level = kwargs.get("alert_level", "info")
+            self.alert_until = time.time() + float(kwargs.get("alert_duration", 2.8))
+        if "clear_alert" in kwargs and kwargs["clear_alert"]:
+            self.alert_text = ""
+            self.alert_until = 0.0
         if "image_path" in kwargs:
             self.image_path = kwargs["image_path"] or ""
             self.image_obj = None
@@ -105,6 +130,8 @@ class RenderThread(threading.Thread):
         state = display_state
         W = self.board.LCD_WIDTH
         H = self.board.LCD_HEIGHT
+        theme = ThemeRegistry.get(state.ui_theme)
+        mood = PigletCharacter.mood_for_status(state.status)
 
         if state.game_surface is not None:
             data = ImageUtils.image_to_rgb565(state.game_surface, W, H)
@@ -115,36 +142,142 @@ class RenderThread(threading.Thread):
             self._render_image(state, W, H)
             return
 
-        header_h = 98
-        header = Image.new("RGBA", (W, header_h), (0, 100, 0, 255))
+        header_h = Layout.HEADER_H
+        footer_h = Layout.FOOTER_H
+
+        header = Image.new("RGBA", (W, header_h), theme.background)
         hd = ImageDraw.Draw(header)
-        self._render_header(header, hd, state, W)
+        self._render_header(header, hd, state, W, theme, mood)
         self.board.draw_image(
             0, 0, W, header_h,
             ImageUtils.image_to_rgb565(header, W, header_h),
         )
 
-        text_h = H - header_h
-        text_img = Image.new("RGBA", (W, text_h), (0, 100, 0, 255))
+        text_h = H - header_h - footer_h
+        text_img = Image.new("RGBA", (W, text_h), theme.panel_alt)
+        td = ImageDraw.Draw(text_img)
+        Components.draw_panel(
+            td,
+            2,
+            2,
+            W - 3,
+            text_h - 3,
+            fill=theme.panel,
+            border=theme.border,
+            radius=12,
+        )
         self._render_text_area(text_img, text_h, state, W)
         self.board.draw_image(
             0, header_h, W, text_h,
             ImageUtils.image_to_rgb565(text_img, W, text_h),
         )
 
-    def _render_header(self, image, draw, state, width):
-        TextUtils.draw_mixed_text(
-            draw, image, state.status, self.status_font, (20, 0)
+        footer_img = Image.new("RGBA", (W, footer_h), theme.panel_alt)
+        fd = ImageDraw.Draw(footer_img)
+        Components.draw_footer(
+            fd,
+            width=W,
+            height=footer_h,
+            hint=hint_for_status(state.status),
+            font=self.battery_font,
+            theme=theme,
+        )
+        self.board.draw_image(
+            0, header_h + text_h, W, footer_h,
+            ImageUtils.image_to_rgb565(footer_img, W, footer_h),
         )
 
-        emoji_bbox = self.emoji_font.getbbox(state.emoji)
-        emoji_w = emoji_bbox[2] - emoji_bbox[0]
+        if state.alert_text and time.time() < state.alert_until:
+            self._render_alert(state, W, H, theme)
+
+    def _render_header(self, image, draw, state, width, theme, mood):
+        Components.draw_panel(
+            draw,
+            2,
+            2,
+            width - 3,
+            image.height - 3,
+            fill=theme.panel,
+            border=theme.border,
+            radius=12,
+        )
+
         TextUtils.draw_mixed_text(
-            draw, image, state.emoji, self.emoji_font,
-            ((width - emoji_w) // 2, 32),
+            draw, image, state.status.upper(), self.status_font, (20, 6)
+        )
+
+        sub_font = self.battery_font
+        subtitle = mood.subtitle.upper()
+        TextUtils.draw_mixed_text(
+            draw,
+            image,
+            subtitle,
+            sub_font,
+            (20, 30),
+        )
+
+        self._render_status_glow(draw, image, width, mood)
+
+        emoji_text = state.emoji if state.emoji and state.emoji != "🐷" else mood.emoji
+        emoji_bbox = self.emoji_font.getbbox(emoji_text)
+        emoji_w = emoji_bbox[2] - emoji_bbox[0]
+        emoji_x = (width - emoji_w) // 2
+        emoji_y = self._emoji_y_for_anim(mood.anim_style)
+        TextUtils.draw_mixed_text(
+            draw, image, emoji_text, self.emoji_font,
+            (emoji_x, emoji_y),
         )
 
         self._render_battery(draw, state, width)
+
+    def _render_status_glow(self, draw, image, width, mood):
+        amt = pulse(0.2, 1.0, speed=1.8)
+        r, g, b = mood.accent_shift
+        color = (min(255, int(120 + r * amt)), min(255, int(90 + g * amt)), min(255, int(120 + b * amt)), 255)
+        y = image.height - 8
+        draw.rounded_rectangle([16, y, width - 16, y + 4], radius=2, fill=color)
+
+    def _emoji_y_for_anim(self, anim_style: str) -> int:
+        if anim_style == "listen_pulse":
+            return int(30 + pulse(-2, 3, speed=3.2))
+        if anim_style == "talk_bob":
+            return int(32 + pulse(-2, 4, speed=4.0))
+        if anim_style == "celebrate":
+            return int(31 + pulse(-3, 5, speed=4.8))
+        if anim_style == "think_blink":
+            return int(33 + pulse(-1, 2, speed=1.8))
+        return int(32 + pulse(-1, 1, speed=1.0))
+
+    def _render_alert(self, state, W, H, theme):
+        alert_h = 34
+        alert_img = Image.new("RGBA", (W, alert_h), (0, 0, 0, 0))
+        ad = ImageDraw.Draw(alert_img)
+        color = alert_color_for_level(theme, state.alert_level)
+        Components.draw_panel(
+            ad,
+            6,
+            2,
+            W - 7,
+            alert_h - 2,
+            fill=(color[0], color[1], color[2], 235),
+            border=theme.border,
+            radius=8,
+        )
+        msg = state.alert_text[:46]
+        TextUtils.draw_mixed_text(
+            ad,
+            alert_img,
+            msg,
+            self.battery_font,
+            (12, 9),
+        )
+        self.board.draw_image(
+            0,
+            H - alert_h - Layout.FOOTER_H,
+            W,
+            alert_h,
+            ImageUtils.image_to_rgb565(alert_img, W, alert_h),
+        )
 
     def _render_battery(self, draw, state, image_width):
         bw, bh = 26, 15

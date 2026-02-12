@@ -219,6 +219,9 @@ class VoiceAgentStateMachine:
             text="Shh... I'm listening!",
             emoji="🐷",
             rgb=(255, 150, 200),
+            alert_text="Okay sweetie, slowing down 💗",
+            alert_level="info",
+            alert_duration=2.2,
         )
         if self._agent:
             self._agent.silence_agent(then_inject=self.SLOW_DOWN_MESSAGE)
@@ -230,6 +233,9 @@ class VoiceAgentStateMachine:
             text="Reconnecting...",
             emoji="🔄",
             rgb=(255, 165, 0),
+            alert_text="Reconnecting Piglet...",
+            alert_level="warn",
+            alert_duration=2.8,
         )
         if self._agent:
             self._agent.disconnect()
@@ -297,7 +303,12 @@ class VoiceAgentStateMachine:
 
         elif event_type == "function_call":
             name = data.get("name", "")
-            self._update_display(text=f"Doing: {name}...")
+            self._update_display(
+                text=f"Doing: {name}...",
+                alert_text=f"Working on: {name}",
+                alert_level="info",
+                alert_duration=2.0,
+            )
 
         elif event_type == "error":
             desc = data.get("description", "Something went wrong")
@@ -305,6 +316,9 @@ class VoiceAgentStateMachine:
                 text=desc,
                 emoji="😟",
                 rgb=(255, 0, 0),
+                alert_text="Oops — I hit a snag",
+                alert_level="error",
+                alert_duration=3.2,
             )
 
         elif event_type == "disconnected":
@@ -312,6 +326,11 @@ class VoiceAgentStateMachine:
             if self.running and reason:
                 # Unexpected disconnect -- try to reconnect
                 print(f"[State] Unexpected disconnect: {reason}, reconnecting...")
+                self._update_display(
+                    alert_text="Connection dropped — retrying",
+                    alert_level="warn",
+                    alert_duration=3.0,
+                )
                 time.sleep(2)
                 self.start_agent()
 
