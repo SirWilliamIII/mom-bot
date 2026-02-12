@@ -334,8 +334,8 @@ class VoiceAgent:
 
     def _handle_audio(self, data):
         """Write audio bytes to the aplay stdin pipe."""
-        if self._dropping_turn:
-            return  # silently discard audio for suppressed double-response
+        if self._dropping_turn or self._force_listen:
+            return  # discard: user is talking (force_listen) or suppressed double-response
 
         self._audio_bytes_received += len(data)
 
@@ -404,6 +404,12 @@ class VoiceAgent:
             self._on_event("agent_thinking", {"content": content})
 
         elif msg_type == "AgentStartedSpeaking":
+            # If user is holding the button (force_listen), suppress agent speech
+            if self._force_listen:
+                self._dropping_turn = True
+                print("[VoiceAgent] Dropping agent speech (user is holding button)")
+                return
+
             # Double-response guard: if agent already spoke and user hasn't
             # said anything, suppress this turn entirely.
             if self._agent_spoke:
