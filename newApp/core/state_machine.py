@@ -32,6 +32,8 @@ class VoiceAgentStateMachine:
 
     _RGB_MIN_INTERVAL = 0.4
 
+    DOUBLE_CLICK_SEC = 0.4
+
     def __init__(self, board, render_thread):
         self.board = board
         self.render_thread = render_thread
@@ -45,6 +47,8 @@ class VoiceAgentStateMachine:
         self._last_rgb_time = 0
         self._last_activity_time = 0
         self._idle_timer = None
+        self._last_click_time = 0
+        self._holding = False
 
         from services.audio import set_volume, set_capture_volume
         set_volume(70)
@@ -272,6 +276,26 @@ class VoiceAgentStateMachine:
 
     def _on_button_press_active(self):
         self._button_press_time = time.time()
+        self._holding = True
+
+        now = time.time()
+        if now - self._last_click_time < self.DOUBLE_CLICK_SEC:
+            print("[Button] Double-click -> silencing agent")
+            self._last_click_time = 0
+            self._holding = False
+            self._silence_agent()
+            return
+
+        if self._agent:
+            self._agent.force_listen(True)
+        self._update_display(
+            status="listening",
+            emoji="🎤",
+            text="I'm listening...",
+            rgb=(0, 255, 0),
+        )
+        self._touch_activity()
+
         self._long_press_timer = threading.Timer(
             self.LONG_PRESS_SEC, self._on_long_press_active
         )
@@ -282,9 +306,17 @@ class VoiceAgentStateMachine:
             self._long_press_timer.cancel()
             self._long_press_timer = None
 
-        hold_time = time.time() - self._button_press_time
-        if hold_time < self.LONG_PRESS_SEC:
-            self._silence_agent()
+        self._holding = False
+        self._last_click_time = time.time()
+
+        if self._agent:
+            self._agent.force_listen(False)
+        self._update_display(
+            status="ready",
+            emoji="🐷",
+            rgb=(0, 0, 85),
+        )
+        self._touch_activity()
 
     def _silence_agent(self):
         print("[Button] Short click -> silencing agent")

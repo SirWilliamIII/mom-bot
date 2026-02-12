@@ -49,6 +49,7 @@ class VoiceAgent:
         self._silence_seq = 0    # increments each silence_agent call; stale injects bail out
         self._agent_spoke = False # True after agent speaks; reset when user speaks
         self._dropping_turn = False  # True = actively suppressing a double-response
+        self._force_listen = False   # True = button held, speaker muted, mic live
 
     @property
     def is_running(self):
@@ -218,6 +219,19 @@ class VoiceAgent:
                 self._ws.send(json.dumps(msg))
             except Exception as e:
                 print(f"[VoiceAgent] Prompt update failed: {e}")
+
+    def force_listen(self, active):
+        """When active=True: mute speaker output, unmute mic (user is talking).
+        When active=False: restore normal operation."""
+        self._force_listen = active
+        if active:
+            self._mic_muted = False
+            self._unmute_at = 0
+            self._dropping_turn = True
+            print("[VoiceAgent] Force-listen ON (speaker muted, mic live)")
+        else:
+            self._dropping_turn = False
+            print("[VoiceAgent] Force-listen OFF")
 
     def send_keep_alive(self):
         """Send keepalive to prevent timeout."""
