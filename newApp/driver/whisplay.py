@@ -58,14 +58,16 @@ class WhisplayBoard:
         # Backlight PWM (created lazily in set_backlight for PWM mode)
         self.backlight_pwm = None
 
-        # Button with edge detection
+        # Button -- polling approach (rpi-lgpio edge detection is unreliable)
         self.button_press_callback = None
         self.button_release_callback = None
         GPIO.setup(self.BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        GPIO.add_event_detect(
-            self.BUTTON_PIN, GPIO.BOTH,
-            callback=self._button_event, bouncetime=50,
+        self._button_last = GPIO.input(self.BUTTON_PIN)
+        self._button_poll_running = True
+        self._button_thread = threading.Thread(
+            target=self._button_poll_loop, daemon=True
         )
+        self._button_thread.start()
 
         # SPI for LCD
         self.spi = spidev.SpiDev()
@@ -240,18 +242,35 @@ class WhisplayBoard:
             )
             time.sleep(delay)
 
-    def _button_event(self, channel):
-        """GPIO edge callback — both press and release."""
-        if GPIO.input(channel):
-            # Rising edge = button pressed (5V)
-            cb = self.button_press_callback
-            if cb:
-                threading.Thread(target=cb, daemon=True).start()
-        else:
-            # Falling edge = button released (0V)
-            cb = self.button_release_callback
-            if cb:
-                threading.Thread(target=cb, daemon=True).start()
+    def _button_poll_loop(self):
+        """Poll button state every 20ms. Fires press/release callbacks on change."""
+        POLL_MS = 0.02
+        DEBOUNCE_COUNT = 2
+        stable_count = 0
+        pending_val = self._button_last
+
+        while self._button_poll_running:
+            time.sleep(POLL_MS)
+            current = GPIO.input(self.BUTTON_PIN)
+
+            if current != pending_val:
+                pending_val = current
+                stable_count = 0
+            else:
+                stable_count += 1
+
+            if stable_count == DEBOUNCE_COUNT and current != self._button_last:
+                self._button_last = current
+                if current:
+                    cb = self.button_press_callback
+                    if cb:
+                        print("[Button] PRESSED")
+                        threading.Thread(target=cb, daemon=True).start()
+                else:
+                    cb = self.button_release_callback
+                    if cb:
+                        print("[Button] RELEASED")
+                        threading.Thread(target=cb, daemon=True).start()
 
     def button_pressed(self):
         return GPIO.input(self.BUTTON_PIN) == 1
@@ -263,6 +282,7 @@ class WhisplayBoard:
         self.button_release_callback = callback
 
     def cleanup(self):
+        self._button_poll_running = False
         if self.backlight_pwm is not None:
             self.backlight_pwm.stop()
         self.spi.close()
