@@ -43,6 +43,7 @@ class VoiceAgent:
         self._state_machine = None  # set by state machine for tool calls
         self._audio_bytes_received = 0
         self._audio_bytes_written = 0
+        self._mic_muted = False  # True while agent is speaking (echo suppression)
 
     @property
     def is_running(self):
@@ -211,8 +212,16 @@ class VoiceAgent:
 
     # --- Internal threads ---
 
+    # Silence frame: same size as a mic chunk but all zeros
+    _SILENCE = b"\x00" * MIC_CHUNK_BYTES
+
     def _send_loop(self):
-        """Read mic audio and send as binary WebSocket frames."""
+        """Read mic audio and send as binary WebSocket frames.
+
+        When the agent is speaking, we still drain the mic buffer (so
+        arecord doesn't stall) but send silence instead — this prevents
+        the speaker audio from feeding back into STT as 'user' speech.
+        """
         print("[VoiceAgent] Mic sender started")
         try:
             while self._running and self._mic_proc and self._mic_proc.poll() is None:
@@ -221,7 +230,7 @@ class VoiceAgent:
                     break
                 if self._ws and self._running:
                     try:
-                        self._ws.send(chunk)
+                        self._ws.send(self._SILENCE if self._mic_muted else chunk)
                     except Exception as e:
                         print(f"[VoiceAgent] Send error: {e}")
                         break
@@ -321,6 +330,7 @@ class VoiceAgent:
             self._on_event("conversation_text", {"role": role, "content": content})
 
         elif msg_type == "UserStartedSpeaking":
+            self._mic_muted = False  # user is talking, make sure mic is live
             self._on_event("user_speaking", {})
 
         elif msg_type == "AgentThinking":
@@ -328,15 +338,18 @@ class VoiceAgent:
             self._on_event("agent_thinking", {"content": content})
 
         elif msg_type == "AgentStartedSpeaking":
+            self._mic_muted = True  # suppress echo while speaking
             latency = data.get("total_latency", 0)
             tts_lat = data.get("tts_latency", 0)
-            print(f"[VoiceAgent] Agent speaking (latency: {latency:.2f}s, tts: {tts_lat:.2f}s)")
+            print(f"[VoiceAgent] Agent speaking (latency: {latency:.2f}s, tts: {tts_lat:.2f}s) [mic muted]")
             self._on_event("agent_speaking", {
                 "total_latency": latency,
                 "tts_latency": tts_lat,
             })
 
         elif msg_type == "AgentAudioDone":
+            self._mic_muted = False  # re-enable mic
+            print("[VoiceAgent] Agent audio done [mic unmuted]")
             self._on_event("agent_audio_done", {})
 
         elif msg_type == "FunctionCallRequest":
