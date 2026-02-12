@@ -31,6 +31,14 @@ class Config:
     DEEPGRAM_LLM_PROVIDER = os.getenv("DEEPGRAM_LLM_PROVIDER", "open_ai")
     DEEPGRAM_LLM_MODEL = os.getenv("DEEPGRAM_LLM_MODEL", "gpt-4o-mini")
 
+    # --- Flux turn detection tuning ---
+    # eot_threshold: confidence needed to finalize turn (0.5-0.9, default 0.7)
+    #   Higher = waits longer for certainty, fewer false cuts
+    # eot_timeout_ms: max silence before forcing turn end (default 5000)
+    #   Lower = snappier responses on ambiguous pauses
+    DEEPGRAM_EOT_THRESHOLD = float(os.getenv("DEEPGRAM_EOT_THRESHOLD", "0.8"))
+    DEEPGRAM_EOT_TIMEOUT_MS = int(os.getenv("DEEPGRAM_EOT_TIMEOUT_MS", "3000"))
+
     # --- Companion personality ---
     COMPANION_NAME = os.getenv("COMPANION_NAME", "Piglet")
     SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "")

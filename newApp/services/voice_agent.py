@@ -318,9 +318,11 @@ class VoiceAgent:
                 "description": desc, "code": code
             })
 
-        elif msg_type in ("PromptUpdated", "SpeakUpdated", "History"):
-            # History = conversation history replay on reconnect, safe to ignore
-            print(f"[VoiceAgent] {msg_type}")
+        elif msg_type in ("PromptUpdated", "SpeakUpdated", "History",
+                          "FunctionCallResponse"):
+            # FunctionCallResponse = our own response echoed back, safe to ignore
+            # History = conversation history replay on reconnect
+            pass
 
         else:
             print(f"[VoiceAgent] Unhandled message type: {msg_type}")
@@ -402,6 +404,8 @@ class VoiceAgent:
                     "provider": {
                         "type": "deepgram",
                         "model": Config.DEEPGRAM_STT_MODEL,
+                        "eot_threshold": Config.DEEPGRAM_EOT_THRESHOLD,
+                        "eot_timeout_ms": Config.DEEPGRAM_EOT_TIMEOUT_MS,
                     }
                 },
                 "think": {
