@@ -256,13 +256,17 @@ class VoiceAgentStateMachine:
     # --- Button handling: IDLE state ---
 
     def _on_button_press_idle(self):
+        print("[Button] PRESSED (idle)")
         self._button_press_time = time.time()
 
     def _on_button_release_idle(self):
         hold_time = time.time() - self._button_press_time
+        print(f"[Button] RELEASED (idle) hold={hold_time:.2f}s need={self.LONG_PRESS_SEC}s")
         if hold_time >= self.LONG_PRESS_SEC:
             print("[Button] Long press in idle -> starting conversation")
             self.start_agent()
+        else:
+            print("[Button] Too short, ignoring")
 
     # --- Button handling: ACTIVE state ---
 
