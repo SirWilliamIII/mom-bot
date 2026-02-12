@@ -46,6 +46,8 @@ class VoiceAgent:
         self._mic_muted = False  # True while agent is speaking (echo suppression)
         self._unmute_at = 0      # timestamp when mic should actually unmute
         self._silence_seq = 0    # increments each silence_agent call; stale injects bail out
+        self._agent_spoke = False # True after agent speaks; reset when user speaks
+        self._dropping_turn = False  # True = actively suppressing a double-response
 
     @property
     def is_running(self):
@@ -285,6 +287,9 @@ class VoiceAgent:
 
     def _handle_audio(self, data):
         """Write audio bytes to the aplay stdin pipe."""
+        if self._dropping_turn:
+            return  # silently discard audio for suppressed double-response
+
         self._audio_bytes_received += len(data)
 
         # Log first chunk and periodically
@@ -342,6 +347,8 @@ class VoiceAgent:
             self._on_event("conversation_text", {"role": role, "content": content})
 
         elif msg_type == "UserStartedSpeaking":
+            self._agent_spoke = False  # user spoke, allow next agent response
+            self._dropping_turn = False
             self._mic_muted = False  # user is talking, make sure mic is live
             self._on_event("user_speaking", {})
 
@@ -350,6 +357,15 @@ class VoiceAgent:
             self._on_event("agent_thinking", {"content": content})
 
         elif msg_type == "AgentStartedSpeaking":
+            # Double-response guard: if agent already spoke and user hasn't
+            # said anything, suppress this turn entirely.
+            if self._agent_spoke:
+                self._dropping_turn = True
+                print("[VoiceAgent] Dropping double-response (no user input since last agent turn)")
+                return
+
+            self._dropping_turn = False
+            self._agent_spoke = True
             self._mic_muted = True  # suppress echo while speaking
             self._unmute_at = 0    # cancel any pending unmute
             latency = data.get("total_latency", 0)
@@ -361,6 +377,10 @@ class VoiceAgent:
             })
 
         elif msg_type == "AgentAudioDone":
+            if self._dropping_turn:
+                self._dropping_turn = False
+                print("[VoiceAgent] Dropped turn audio done")
+                return
             # Schedule unmute after a delay — aplay buffer still has audio
             # queued after Deepgram says done. The send loop checks the clock.
             self._unmute_at = time.time() + 0.8
