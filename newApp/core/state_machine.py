@@ -16,10 +16,11 @@ class VoiceAgentStateMachine:
     """State machine for Deepgram Voice Agent mode.
 
     Conversation flow:
-        idle    → long press (1s) → connect agent, send hello → active
-        active  → always listening, agent responds automatically
-                → short click = silence agent immediately
-                → long press (1s) = end conversation → idle
+        idle    → user holds button and speaks → connect agent → active
+        active  → user holds button while speaking (push-to-talk)
+                → bot waits at least 1s before responding after user releases
+                → double-click = pause (no user talking, agent stays connected)
+                → long press (≥5s) = end conversation → idle
                 → user says 'bye'/'goodbye' = end conversation → idle
                 → 60s no activity = end conversation → idle
         game    → local game running, agent paused
@@ -28,11 +29,11 @@ class VoiceAgentStateMachine:
 
     BYE_WORDS = {"bye", "goodbye", "ok bye", "good bye", "see ya", "see you", "bye bye"}
     IDLE_TIMEOUT_SEC = 60
-    LONG_PRESS_SEC = 1.0
+    LONG_PRESS_SEC = 5.0
+    DOUBLE_CLICK_SEC = 0.4
+    RESPONSE_DELAY_SEC = 1.0
 
     _RGB_MIN_INTERVAL = 0.4
-
-    DOUBLE_CLICK_SEC = 0.4
 
     def __init__(self, board, render_thread):
         self.board = board
@@ -49,6 +50,8 @@ class VoiceAgentStateMachine:
         self._idle_timer = None
         self._last_click_time = 0
         self._holding = False
+        self._paused = False
+        self._response_delay_timer = None
 
         from services.audio import set_volume, set_capture_volume
         set_volume(70)
@@ -74,7 +77,6 @@ class VoiceAgentStateMachine:
             self._agent.connect()
             if self._agent.is_running:
                 self._set_state("active")
-                self._send_hello()
             else:
                 self._update_display(
                     text="Couldn't connect. Check WiFi?",
@@ -84,15 +86,6 @@ class VoiceAgentStateMachine:
 
         thread = threading.Thread(target=do_connect, daemon=True)
         thread.start()
-
-    def _send_hello(self):
-        if self._agent:
-            print("[State] Sending hello to start conversation")
-            self._agent.inject_user_message(
-                "[SYSTEM: The user just started a conversation by pressing the button. "
-                "Greet them warmly and briefly! Keep it to 1-2 sentences.]"
-            )
-            self._touch_activity()
 
     def _end_conversation(self, reason=""):
         print(f"[State] Ending conversation: {reason}")
@@ -111,6 +104,7 @@ class VoiceAgentStateMachine:
     def stop(self):
         self.running = False
         self._cancel_idle_timer()
+        self._cancel_response_delay()
         if self._agent:
             self._agent.disconnect()
         if self._active_game:
@@ -174,7 +168,7 @@ class VoiceAgentStateMachine:
 
     def _enter_idle(self, **kwargs):
         name = Config.COMPANION_NAME
-        text = kwargs.get("text", f"Hold button to talk to {name}!")
+        text = kwargs.get("text", f"Hold button and talk to {name}!")
         self._update_display(
             status="sleeping",
             emoji="🐷",
@@ -260,17 +254,20 @@ class VoiceAgentStateMachine:
     # --- Button handling: IDLE state ---
 
     def _on_button_press_idle(self):
-        print("[Button] PRESSED (idle)")
+        """User holds button and speaks to initiate conversation."""
+        print("[Button] PRESSED (idle) -> starting conversation")
         self._button_press_time = time.time()
+        self._holding = True
+        self.start_agent()
 
     def _on_button_release_idle(self):
         hold_time = time.time() - self._button_press_time
-        print(f"[Button] RELEASED (idle) hold={hold_time:.2f}s need={self.LONG_PRESS_SEC}s")
-        if hold_time >= self.LONG_PRESS_SEC:
-            print("[Button] Long press in idle -> starting conversation")
-            self.start_agent()
-        else:
-            print("[Button] Too short, ignoring")
+        print(f"[Button] RELEASED (idle) hold={hold_time:.2f}s")
+        self._holding = False
+        # Agent is connecting/connected; release triggers response delay
+        if self._agent:
+            self._agent.force_listen(False)
+            self._schedule_response_delay()
 
     # --- Button handling: ACTIVE state ---
 
@@ -278,15 +275,24 @@ class VoiceAgentStateMachine:
         self._button_press_time = time.time()
         self._holding = True
 
+        # Cancel any pending response delay (user is talking again)
+        self._cancel_response_delay()
+
         now = time.time()
         if now - self._last_click_time < self.DOUBLE_CLICK_SEC:
-            print("[Button] Double-click -> silencing agent")
+            print("[Button] Double-click -> pausing (no user talking)")
             self._last_click_time = 0
             self._holding = False
-            self._silence_agent()
+            self._toggle_pause()
             return
 
+        # If paused, unpause on button press
+        if self._paused:
+            self._toggle_pause()
+
+        # Silence any ongoing agent speech and switch to listening
         if self._agent:
+            self._agent.silence_agent()
             self._agent.force_listen(True)
         self._update_display(
             status="listening",
@@ -311,26 +317,67 @@ class VoiceAgentStateMachine:
 
         if self._agent:
             self._agent.force_listen(False)
-        self._update_display(
-            status="ready",
-            emoji="🐷",
-            rgb=(0, 0, 85),
-        )
+
+        # Wait at least RESPONSE_DELAY_SEC before bot responds
+        self._schedule_response_delay()
         self._touch_activity()
 
-    def _silence_agent(self):
-        print("[Button] Short click -> silencing agent")
-        if self._agent:
-            self._agent.silence_agent()
+    def _schedule_response_delay(self):
+        """Wait at least RESPONSE_DELAY_SEC after user stops talking before bot responds."""
+        self._cancel_response_delay()
         self._update_display(
-            status="ready",
-            emoji="🐷",
-            rgb=(0, 0, 85),
+            status="thinking",
+            emoji="🤔",
+            text="Let me think...",
+            rgb=(255, 165, 0),
         )
+        self._response_delay_timer = threading.Timer(
+            self.RESPONSE_DELAY_SEC, self._on_response_delay_done
+        )
+        self._response_delay_timer.daemon = True
+        self._response_delay_timer.start()
+
+    def _cancel_response_delay(self):
+        timer = getattr(self, "_response_delay_timer", None)
+        if timer:
+            timer.cancel()
+            self._response_delay_timer = None
+
+    def _on_response_delay_done(self):
+        """Response delay elapsed — bot can now respond."""
+        self._response_delay_timer = None
+        if self.state == "active" and not self._holding:
+            self._update_display(
+                status="ready",
+                emoji="🐷",
+                rgb=(0, 0, 85),
+            )
+
+    def _toggle_pause(self):
+        """Double-click toggles pause — mutes user mic but keeps agent connected."""
+        self._paused = not self._paused
+        if self._paused:
+            print("[Button] Paused (muted)")
+            if self._agent:
+                self._agent.force_listen(False)
+            self._update_display(
+                status="paused",
+                emoji="⏸️",
+                text="Paused — hold button to talk",
+                rgb=(100, 100, 0),
+            )
+        else:
+            print("[Button] Unpaused")
+            self._update_display(
+                status="ready",
+                emoji="🐷",
+                text=f"{Config.COMPANION_NAME} is here!",
+                rgb=(0, 0, 85),
+            )
         self._touch_activity()
 
     def _on_long_press_active(self):
-        print("[Button] Long press in active -> ending conversation")
+        print("[Button] Long press (≥5s) in active -> ending conversation")
         self._end_conversation("button")
 
     # --- Voice Agent event handler ---

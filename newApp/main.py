@@ -142,7 +142,7 @@ def main():
     signal.signal(signal.SIGTERM, cleanup)
     signal.signal(signal.SIGINT, cleanup)
 
-    # Voice Agent mode: agent starts on long press (1s), not at boot.
+    # Voice Agent mode: user holds button while speaking (push-to-talk).
     # Legacy mode: button press/release handled entirely by the state machine.
 
     try:
