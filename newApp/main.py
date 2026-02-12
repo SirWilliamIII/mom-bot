@@ -131,6 +131,7 @@ def main():
         try:
             if board:
                 board.set_rgb(0, 0, 0)
+                board.fill_screen(0x0000)
                 board.set_backlight(0)
                 board.cleanup()
         except Exception:

@@ -105,7 +105,7 @@ class Layout:
 
     HEADER_H = 90
     FOOTER_H = 26
-    PAD = 10
+    PAD = 16
 
 
 class Components:
@@ -192,15 +192,13 @@ def hint_for_status(status: str) -> str:
     if status in ("sleeping", "idle", "sleep"):
         return "Hold button to start talking"
     if status in ("ready", "wait"):
-        return "Hold button to talk"
+        return "Hold to talk · 2x tap to end"
     if status == "listening":
         return "Speak now! Release when done"
     if status in ("thinking", "waking up"):
         return "Piglet is thinking..."
     if status in ("talking", "answering"):
-        return "Hold button to interrupt"
-    if status == "paused":
-        return "Double-click to unpause"
+        return "Hold to interrupt · 2x tap to end"
     if status in ("playing", "playing music"):
         return "Long-press to exit"
     return ""

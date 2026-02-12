@@ -97,19 +97,57 @@ class TextUtils:
 
     @staticmethod
     def wrap_text(text, font, max_width):
+        """Word-aware text wrapping. Only breaks mid-word if a word exceeds max_width."""
         lines = []
+        # Split into words preserving spaces
+        words = text.split(' ')
         current_line = ""
         current_width = 0
-        for char in text:
-            char_w = TextUtils.get_char_size(font, char)[0]
-            if current_width + char_w <= max_width:
-                current_line += char
-                current_width += char_w
+        space_w = TextUtils.get_char_size(font, ' ')[0]
+
+        for i, word in enumerate(words):
+            word_w = sum(TextUtils.get_char_size(font, c)[0] for c in word)
+
+            if current_width == 0:
+                # First word on line
+                if word_w <= max_width:
+                    current_line = word
+                    current_width = word_w
+                else:
+                    # Word too long — break it character by character
+                    for char in word:
+                        char_w = TextUtils.get_char_size(font, char)[0]
+                        if current_width + char_w > max_width and current_line:
+                            lines.append(current_line)
+                            current_line = char
+                            current_width = char_w
+                        else:
+                            current_line += char
+                            current_width += char_w
+            elif current_width + space_w + word_w <= max_width:
+                # Word fits on current line
+                current_line += ' ' + word
+                current_width += space_w + word_w
             else:
-                if current_line:
-                    lines.append(current_line)
-                current_line = char
-                current_width = char_w
+                # Word doesn't fit — start new line
+                lines.append(current_line)
+                if word_w <= max_width:
+                    current_line = word
+                    current_width = word_w
+                else:
+                    # Word too long — break it character by character
+                    current_line = ""
+                    current_width = 0
+                    for char in word:
+                        char_w = TextUtils.get_char_size(font, char)[0]
+                        if current_width + char_w > max_width and current_line:
+                            lines.append(current_line)
+                            current_line = char
+                            current_width = char_w
+                        else:
+                            current_line += char
+                            current_width += char_w
+
         if current_line:
             lines.append(current_line)
         return lines

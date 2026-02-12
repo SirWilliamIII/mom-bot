@@ -28,10 +28,10 @@ class VoiceAgentStateMachine:
         idle    → user holds button and speaks → connect agent → active
         active  → hold button = push-to-talk (mic live while held)
                 → release button = agent responds after 0.5s delay
-                → double-click = toggle pause (mic muted, agent connected)
-                → hold ≥3s = kill program
+                → double-click = end conversation → idle
+                → hold ≥10s = kill program
                 → user says 'bye'/'goodbye' = end conversation → idle
-                → 60s no activity = end conversation → idle
+                → 30s no activity = end conversation → idle
         game    → local game running, agent paused
         music   → music playing, agent still active
 
@@ -42,8 +42,8 @@ class VoiceAgentStateMachine:
     """
 
     BYE_WORDS = {"bye", "goodbye", "ok bye", "good bye", "see ya", "see you", "bye bye"}
-    IDLE_TIMEOUT_SEC = 10
-    KILL_PRESS_SEC = 3.0
+    IDLE_TIMEOUT_SEC = 30
+    KILL_PRESS_SEC = 10.0
     DOUBLE_CLICK_SEC = 0.4
     RESPONSE_DELAY_SEC = 0.5
 
@@ -60,7 +60,6 @@ class VoiceAgentStateMachine:
         self._agent = None
         self._button_press_time = 0
         self._holding = False
-        self._paused = False
         self._last_click_time = 0
         self._current_rgb = None
         self._last_rgb_time = 0
@@ -163,6 +162,14 @@ class VoiceAgentStateMachine:
             self._agent.disconnect()
         if self._active_game:
             self._active_game.stop()
+        # Graceful screen shutdown
+        if self.board:
+            try:
+                self.board.set_rgb(0, 0, 0)
+                self.board.fill_screen(0x0000)
+                self.board.set_backlight(0)
+            except Exception:
+                pass
 
     # --- Activity tracking & idle timeout ---
 
@@ -215,7 +222,6 @@ class VoiceAgentStateMachine:
             handler(**kwargs)
 
     def _enter_idle(self, **kwargs):
-        self._paused = False
         name = Config.COMPANION_NAME
         text = kwargs.get("text", f"Hold button and talk to {name}!")
         self._update_display(
@@ -340,15 +346,15 @@ class VoiceAgentStateMachine:
 
             now = time.time()
             if now - self._last_click_time < self.DOUBLE_CLICK_SEC:
-                print("[Button] Double-click -> toggling pause")
+                print("[Button] Double-click -> ending conversation")
                 self._last_click_time = 0
                 self._holding = False
-                self._toggle_pause()
+                threading.Thread(
+                    target=self._end_conversation,
+                    args=("double_click",),
+                    daemon=True,
+                ).start()
                 return
-
-            # Unpause if currently paused
-            if self._paused:
-                self._toggle_pause()
 
             # Silence agent and enable mic (push-to-talk)
             if self._agent:
@@ -362,7 +368,7 @@ class VoiceAgentStateMachine:
             )
             self._touch_activity()
 
-            # 3s hold = kill program
+            # 10s hold = kill program
             self._kill_timer = self._start_timer(
                 self.KILL_PRESS_SEC, self._on_kill_press
             )
@@ -373,12 +379,6 @@ class VoiceAgentStateMachine:
 
             self._holding = False
             self._last_click_time = time.time()
-
-            # If paused, just disable mic — don't trigger a response
-            if self._paused:
-                if self._agent:
-                    self._agent.set_input_enabled(False)
-                return
 
             if self._agent:
                 self._agent.set_input_enabled(False)
@@ -391,35 +391,9 @@ class VoiceAgentStateMachine:
             )
             self._touch_activity()
 
-    def _toggle_pause(self):
-        """Double-click toggles pause — mutes mic, silences agent, keeps connected."""
-        self._paused = not self._paused
-        if self._paused:
-            print("[Button] Paused")
-            if self._agent:
-                self._agent.silence_agent()
-                self._agent.set_paused(True)
-            self._update_display(
-                status="paused",
-                emoji="⏸️",
-                text="Paused — hold button to talk",
-                turn="paused",
-            )
-        else:
-            print("[Button] Unpaused")
-            if self._agent:
-                self._agent.set_paused(False)
-            self._update_display(
-                status="ready",
-                emoji="🐷",
-                text=f"{Config.COMPANION_NAME} is here!",
-                turn="red",
-            )
-        self._touch_activity()
-
     def _on_kill_press(self):
-        """Fired when button is held for 3s — kills the program."""
-        print("[Button] 3s hold -> killing program")
+        """Fired when button is held for 10s — kills the program."""
+        print("[Button] 10s hold -> killing program")
         import os
         os._exit(0)
 

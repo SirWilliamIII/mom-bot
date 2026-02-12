@@ -182,12 +182,13 @@ class RenderThread(threading.Thread):
         text_h = H - header_h - footer_h
         text_img = Image.new("RGBA", (W, text_h), theme.panel_alt)
         td = ImageDraw.Draw(text_img)
+        pad = Layout.PAD
         Components.draw_panel(
             td,
-            2,
-            2,
-            W - 3,
-            text_h - 3,
+            pad // 2,
+            pad // 2,
+            W - pad // 2 - 1,
+            text_h - pad // 2 - 1,
             fill=theme.panel,
             border=theme.border,
             radius=12,
@@ -348,7 +349,9 @@ class RenderThread(threading.Thread):
         if not state.text:
             return
 
-        lines = TextUtils.wrap_text(state.text, self.main_font, width - 20)
+        pad = Layout.PAD
+        text_margin = pad + 6  # inner margin from panel edge
+        lines = TextUtils.wrap_text(state.text, self.main_font, width - text_margin * 2)
         lh = self.line_height
 
         render_text = ""
@@ -370,7 +373,7 @@ class RenderThread(threading.Thread):
             td = ImageDraw.Draw(self._text_cache_img)
             ry = 0
             for line, _ in display_lines:
-                TextUtils.draw_mixed_text(td, self._text_cache_img, line, self.main_font, (10, ry), fill=theme.text_soft)
+                TextUtils.draw_mixed_text(td, self._text_cache_img, line, self.main_font, (text_margin, ry), fill=theme.text_soft)
                 ry += lh
 
         if self._text_cache_img:
