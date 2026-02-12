@@ -1,10 +1,8 @@
 import os
 import random
 
-import pygame
-
 from config import Config
-from services.audio import stop_playback
+from services.audio import play_audio_file, stop_playback, is_playing
 
 
 class MusicPlayer:
@@ -12,6 +10,7 @@ class MusicPlayer:
         self.songs = []
         self.current_index = -1
         self.is_playing = False
+        self._current_proc = None
         self._scan_music()
 
     def _scan_music(self):
@@ -50,25 +49,30 @@ class MusicPlayer:
 
         song = self.songs[self.current_index]
         try:
-            pygame.mixer.music.load(song["path"])
-            pygame.mixer.music.play()
+            # Stop any current playback first
+            if self._current_proc and self._current_proc.poll() is None:
+                stop_playback()
+            # play_audio_file handles MP3→WAV conversion and routes through aplay
+            self._current_proc = play_audio_file(song["path"], blocking=False)
             self.is_playing = True
             return f"Now playing: {song['name']}"
         except Exception as e:
             print(f"[Music] Error playing {song['path']}: {e}")
-            return f"Sorry, I couldn't play that song."
+            return "Sorry, I couldn't play that song."
 
     def pause(self):
+        # aplay doesn't support pause — stop instead
         if self.is_playing:
-            pygame.mixer.music.pause()
+            stop_playback()
             self.is_playing = False
             return "Music paused."
         return "No music is playing."
 
     def resume(self):
-        pygame.mixer.music.unpause()
-        self.is_playing = True
-        return "Resuming music."
+        # Re-play current song from the beginning (aplay has no resume)
+        if 0 <= self.current_index < len(self.songs):
+            return self.play_song(self.songs[self.current_index]["name"])
+        return "No song to resume."
 
     def skip(self):
         if not self.songs:
@@ -79,6 +83,7 @@ class MusicPlayer:
     def stop(self):
         stop_playback()
         self.is_playing = False
+        self._current_proc = None
         return "Music stopped."
 
     def get_current_song_name(self):

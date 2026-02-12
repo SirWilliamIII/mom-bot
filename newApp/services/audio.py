@@ -3,12 +3,8 @@ import os
 import threading
 import time
 
-import pygame
-
 from config import Config
 
-
-pygame.mixer.init()
 
 _recording_process = None
 _recording_lock = threading.Lock()
@@ -45,19 +41,21 @@ def set_capture_volume(percent=100):
 def _capture_device():
     """Return the ALSA capture device name.
 
-    plughw: supports full-duplex on the WM8960 — arecord and aplay can
-    both open plughw: concurrently. No dmix/dsnoop/asoundrc needed.
+    Uses 'default' which routes through our asoundrc dsnoop config
+    (ipc_key 666666). This allows multiple capture clients and
+    simultaneous recording + playback (full-duplex).
     """
-    return f"plughw:{Config.SOUND_CARD_NAME}"
+    return "default"
 
 
 def _playback_device():
     """Return the ALSA playback device name.
 
-    plughw: supports full-duplex on the WM8960 — arecord and aplay can
-    both open plughw: concurrently. No dmix/dsnoop/asoundrc needed.
+    Uses 'default' which routes through our asoundrc dmix config
+    (ipc_key 555555). This allows multiple playback clients and
+    simultaneous recording + playback (full-duplex).
     """
-    return f"plughw:{Config.SOUND_CARD_NAME}"
+    return "default"
 
 
 # --- File-based recording (legacy mode) ---
@@ -188,7 +186,7 @@ def play_audio_bytes(audio_bytes, format_hint="wav"):
 # --- Playback control ---
 
 def stop_playback():
-    """Kill all active playback (aplay subprocesses + pygame mixer)."""
+    """Kill all active playback (aplay subprocesses)."""
     with _playback_lock:
         for proc in _active_playback:
             if proc.poll() is None:
@@ -203,18 +201,8 @@ def stop_playback():
     except Exception:
         pass
 
-    try:
-        pygame.mixer.music.stop()
-    except Exception:
-        pass
-
 
 def is_playing():
     with _playback_lock:
         _active_playback[:] = [p for p in _active_playback if p.poll() is None]
-        if _active_playback:
-            return True
-    try:
-        return pygame.mixer.music.get_busy()
-    except Exception:
-        return False
+        return bool(_active_playback)

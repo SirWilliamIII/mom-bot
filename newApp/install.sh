@@ -29,7 +29,7 @@ echo "[4/6] Installing Python packages..."
 pip install --upgrade pip
 pip install rpi-lgpio
 pip install openai google-generativeai
-pip install python-dotenv cairosvg pygame Pillow numpy
+pip install python-dotenv cairosvg Pillow numpy
 pip install websockets duckduckgo_search
 
 echo "[5/6] Setting up ALSA for full-duplex audio..."
