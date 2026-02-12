@@ -45,6 +45,7 @@ class VoiceAgent:
         self._audio_bytes_written = 0
         self._mic_muted = False  # True while agent is speaking (echo suppression)
         self._unmute_at = 0      # timestamp when mic should actually unmute
+        self._silence_seq = 0    # increments each silence_agent call; stale injects bail out
 
     @property
     def is_running(self):
@@ -165,11 +166,12 @@ class VoiceAgent:
     def silence_agent(self, then_inject=None):
         """Immediately kill speaker output, then optionally inject a message.
 
-        This is the 'tranquilo' button: cuts audio locally so the agent
-        shuts up right away, then (after a brief pause for the server to
-        finish its current audio stream) injects a calming instruction.
+        Debounced: rapid presses only restart the speaker once and only
+        the last press's inject fires (earlier ones see a stale seq and bail).
         """
-        print("[VoiceAgent] Silencing agent (button pressed)...")
+        self._silence_seq += 1
+        my_seq = self._silence_seq
+        print(f"[VoiceAgent] Silencing agent (seq={my_seq})...")
 
         # 1. Kill the speaker process — instant silence
         if self._speaker_proc and self._speaker_proc.poll() is None:
@@ -185,12 +187,13 @@ class VoiceAgent:
             sample_rate=Config.DEEPGRAM_TTS_SAMPLE_RATE
         )
 
-        # 3. After a short delay, inject the follow-up message
-        #    (gives the server time to finish its current audio burst
-        #     so InjectAgentMessage won't get InjectionRefused)
+        # 3. After a delay, inject — but only if no newer press happened
         if then_inject:
             def _delayed_inject():
-                time.sleep(1.5)
+                time.sleep(2.0)
+                if self._silence_seq != my_seq:
+                    print(f"[VoiceAgent] Inject skipped (stale seq={my_seq}, current={self._silence_seq})")
+                    return
                 self.inject_user_message(then_inject)
             threading.Thread(target=_delayed_inject, daemon=True).start()
 
