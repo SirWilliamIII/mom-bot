@@ -404,8 +404,6 @@ class VoiceAgent:
                     "provider": {
                         "type": "deepgram",
                         "model": Config.DEEPGRAM_STT_MODEL,
-                        "eot_threshold": Config.DEEPGRAM_EOT_THRESHOLD,
-                        "eot_timeout_ms": Config.DEEPGRAM_EOT_TIMEOUT_MS,
                     }
                 },
                 "think": {
