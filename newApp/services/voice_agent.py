@@ -5,6 +5,7 @@ Binary frames = raw PCM audio. JSON text frames = control messages.
 """
 
 import json
+import struct
 import threading
 import time
 from datetime import datetime
@@ -230,16 +231,29 @@ class VoiceAgent:
 
     # Silence frame: same size as a mic chunk but all zeros
     _SILENCE = b"\x00" * MIC_CHUNK_BYTES
+    _ECHO_GATE_RMS = 800
+    _ECHO_GATE_DURATION = 3.0
+
+    @staticmethod
+    def _rms(pcm_bytes):
+        """Compute RMS of 16-bit LE PCM audio."""
+        n = len(pcm_bytes) // 2
+        if n == 0:
+            return 0
+        samples = struct.unpack(f"<{n}h", pcm_bytes[:n * 2])
+        return int((sum(s * s for s in samples) / n) ** 0.5)
 
     def _send_loop(self):
         """Read mic audio and send as binary WebSocket frames.
 
-        Echo suppression: while _mic_muted is True we send silence.
-        After AgentAudioDone sets _unmute_at, we wait until that
-        timestamp before flipping _mic_muted off — all checked right
-        here in the loop, no extra threads.
+        Echo suppression layers:
+        1. Hard mute while agent is speaking (_mic_muted)
+        2. After unmute, energy gate for _ECHO_GATE_DURATION seconds:
+           only send audio if RMS > _ECHO_GATE_RMS (real speech),
+           otherwise send silence (suppress echo tail)
         """
         print("[VoiceAgent] Mic sender started")
+        gate_until = 0
         try:
             while self._running and self._mic_proc and self._mic_proc.poll() is None:
                 chunk = self._mic_proc.stdout.read(MIC_CHUNK_BYTES)
@@ -250,11 +264,20 @@ class VoiceAgent:
                 if self._mic_muted and self._unmute_at and time.time() >= self._unmute_at:
                     self._mic_muted = False
                     self._unmute_at = 0
-                    print("[VoiceAgent] Mic unmuted (buffer drain complete)")
+                    gate_until = time.time() + self._ECHO_GATE_DURATION
+                    print("[VoiceAgent] Mic unmuted -> energy gate active")
+
+                send_chunk = chunk
+                if self._mic_muted:
+                    send_chunk = self._SILENCE
+                elif time.time() < gate_until:
+                    rms = self._rms(chunk)
+                    if rms < self._ECHO_GATE_RMS:
+                        send_chunk = self._SILENCE
 
                 if self._ws and self._running:
                     try:
-                        self._ws.send(self._SILENCE if self._mic_muted else chunk)
+                        self._ws.send(send_chunk)
                     except Exception as e:
                         print(f"[VoiceAgent] Send error: {e}")
                         break
