@@ -44,6 +44,7 @@ class VoiceAgent:
         self._audio_bytes_received = 0
         self._audio_bytes_written = 0
         self._mic_muted = False  # True while agent is speaking (echo suppression)
+        self._unmute_at = 0      # timestamp when mic should actually unmute
 
     @property
     def is_running(self):
@@ -218,9 +219,10 @@ class VoiceAgent:
     def _send_loop(self):
         """Read mic audio and send as binary WebSocket frames.
 
-        When the agent is speaking, we still drain the mic buffer (so
-        arecord doesn't stall) but send silence instead — this prevents
-        the speaker audio from feeding back into STT as 'user' speech.
+        Echo suppression: while _mic_muted is True we send silence.
+        After AgentAudioDone sets _unmute_at, we wait until that
+        timestamp before flipping _mic_muted off — all checked right
+        here in the loop, no extra threads.
         """
         print("[VoiceAgent] Mic sender started")
         try:
@@ -228,6 +230,13 @@ class VoiceAgent:
                 chunk = self._mic_proc.stdout.read(MIC_CHUNK_BYTES)
                 if not chunk:
                     break
+
+                # Check if it's time to unmute
+                if self._mic_muted and self._unmute_at and time.time() >= self._unmute_at:
+                    self._mic_muted = False
+                    self._unmute_at = 0
+                    print("[VoiceAgent] Mic unmuted (buffer drain complete)")
+
                 if self._ws and self._running:
                     try:
                         self._ws.send(self._SILENCE if self._mic_muted else chunk)
@@ -339,6 +348,7 @@ class VoiceAgent:
 
         elif msg_type == "AgentStartedSpeaking":
             self._mic_muted = True  # suppress echo while speaking
+            self._unmute_at = 0    # cancel any pending unmute
             latency = data.get("total_latency", 0)
             tts_lat = data.get("tts_latency", 0)
             print(f"[VoiceAgent] Agent speaking (latency: {latency:.2f}s, tts: {tts_lat:.2f}s) [mic muted]")
@@ -348,14 +358,10 @@ class VoiceAgent:
             })
 
         elif msg_type == "AgentAudioDone":
-            # Delay unmute — the aplay buffer still has ~200-500ms of audio
-            # queued up after Deepgram says it's done sending. If we unmute
-            # immediately, the tail end of Piglet's voice gets picked up.
-            def _delayed_unmute():
-                time.sleep(0.6)
-                self._mic_muted = False
-                print("[VoiceAgent] Agent audio done [mic unmuted after 600ms]")
-            threading.Thread(target=_delayed_unmute, daemon=True).start()
+            # Schedule unmute after a delay — aplay buffer still has audio
+            # queued after Deepgram says done. The send loop checks the clock.
+            self._unmute_at = time.time() + 0.8
+            print("[VoiceAgent] Agent audio done [mic unmutes in 800ms]")
             self._on_event("agent_audio_done", {})
 
         elif msg_type == "FunctionCallRequest":
