@@ -125,21 +125,31 @@ class VoiceAgent:
         print("[VoiceAgent] Disconnecting...")
 
         # Kill mic
-        if self._mic_proc and self._mic_proc.poll() is None:
-            self._mic_proc.terminate()
-            try:
-                self._mic_proc.wait(timeout=2)
-            except Exception:
-                self._mic_proc.kill()
+        if self._mic_proc:
+            for pipe in (self._mic_proc.stdout, self._mic_proc.stderr):
+                if pipe:
+                    try:
+                        pipe.close()
+                    except Exception:
+                        pass
+            if self._mic_proc.poll() is None:
+                self._mic_proc.terminate()
+                try:
+                    self._mic_proc.wait(timeout=2)
+                except Exception:
+                    self._mic_proc.kill()
         self._mic_proc = None
 
         # Kill speaker
-        if self._speaker_proc and self._speaker_proc.poll() is None:
-            try:
-                self._speaker_proc.stdin.close()
-            except Exception:
-                pass
-            self._speaker_proc.terminate()
+        if self._speaker_proc:
+            for pipe in (self._speaker_proc.stdin, self._speaker_proc.stdout, self._speaker_proc.stderr):
+                if pipe:
+                    try:
+                        pipe.close()
+                    except Exception:
+                        pass
+            if self._speaker_proc.poll() is None:
+                self._speaker_proc.terminate()
         self._speaker_proc = None
         stop_playback()
 
@@ -383,8 +393,8 @@ class VoiceAgent:
                 return
             # Schedule unmute after a delay — aplay buffer still has audio
             # queued after Deepgram says done. The send loop checks the clock.
-            self._unmute_at = time.time() + 1.2
-            print("[VoiceAgent] Agent audio done [mic unmutes in 1200ms]")
+            self._unmute_at = time.time() + 2.0
+            print("[VoiceAgent] Agent audio done [mic unmutes in 2000ms]")
             self._on_event("agent_audio_done", {})
 
         elif msg_type == "FunctionCallRequest":
