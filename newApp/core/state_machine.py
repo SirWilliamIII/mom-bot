@@ -7,6 +7,16 @@ from config import Config
 from core.conversation import Conversation
 from ui.renderer import display_state, RenderThread
 from ui.utils import ColorUtils
+from ui.framework import TURN_BASES
+
+# LED colors derived from the turn palette
+TURN_RGB = {
+    "green":  TURN_BASES["green"],    # (0, 210, 80)
+    "red":    TURN_BASES["red"],      # (220, 30, 45)
+    "amber":  TURN_BASES["amber"],    # (255, 165, 0)
+    "sleep":  TURN_BASES["sleep"],    # (90, 35, 110)
+    "paused": TURN_BASES["paused"],   # (120, 120, 140)
+}
 
 
 # ---------- VOICE AGENT MODE ----------
@@ -16,10 +26,10 @@ class VoiceAgentStateMachine:
 
     Conversation flow:
         idle    → user holds button and speaks → connect agent → active
-        active  → user holds button while speaking (push-to-talk)
-                → agent waits 0.5s after button release before responding
-                → double-click OR hold ≥2s = pause (mic muted, agent connected)
-                → long press (≥5s) = end conversation → idle
+        active  → hold button = push-to-talk (mic live while held)
+                → release button = agent responds after 0.5s delay
+                → double-click = toggle pause (mic muted, agent connected)
+                → hold ≥3s = kill program
                 → user says 'bye'/'goodbye' = end conversation → idle
                 → 60s no activity = end conversation → idle
         game    → local game running, agent paused
@@ -32,9 +42,8 @@ class VoiceAgentStateMachine:
     """
 
     BYE_WORDS = {"bye", "goodbye", "ok bye", "good bye", "see ya", "see you", "bye bye"}
-    IDLE_TIMEOUT_SEC = 60
-    PAUSE_HOLD_SEC = 2.0
-    LONG_PRESS_SEC = 5.0
+    IDLE_TIMEOUT_SEC = 10
+    KILL_PRESS_SEC = 3.0
     DOUBLE_CLICK_SEC = 0.4
     RESPONSE_DELAY_SEC = 0.5
 
@@ -57,8 +66,7 @@ class VoiceAgentStateMachine:
         self._last_rgb_time = 0
 
         # Timers (all guarded by epoch)
-        self._long_press_timer = None
-        self._pause_timer = None
+        self._kill_timer = None
         self._idle_timer = None
 
         from services.audio import set_volume, set_capture_volume
@@ -92,7 +100,7 @@ class VoiceAgentStateMachine:
             setattr(self, attr_name, None)
 
     def _cancel_all_timers(self):
-        for name in ("_long_press_timer", "_pause_timer", "_idle_timer"):
+        for name in ("_kill_timer", "_idle_timer"):
             self._cancel_timer(name)
 
     # --- Agent lifecycle ---
@@ -104,7 +112,7 @@ class VoiceAgentStateMachine:
             status="listening",
             emoji="🎤",
             text="I'm listening...",
-            rgb=(0, 255, 0),
+            turn="green",
             scroll_speed=0,
         )
 
@@ -117,7 +125,7 @@ class VoiceAgentStateMachine:
                 if not self._agent or not self._agent.is_running:
                     self._update_display(
                         text="Couldn't connect. Check WiFi?",
-                        rgb=(255, 0, 0),
+                        turn="red",
                     )
                     self._set_state("idle")
                     return
@@ -214,7 +222,7 @@ class VoiceAgentStateMachine:
             status="sleeping",
             emoji="🐷",
             text=text,
-            rgb=(50, 20, 50),
+            turn="sleep",
             scroll_speed=0,
         )
         if self.board:
@@ -229,7 +237,7 @@ class VoiceAgentStateMachine:
                 status="ready",
                 emoji="🐷",
                 text=kwargs.get("text", f"{name} is here!"),
-                rgb=(0, 0, 85),
+                turn="red",
                 scroll_speed=0,
             )
         self._touch_activity()
@@ -302,10 +310,14 @@ class VoiceAgentStateMachine:
             print("[Button] PRESSED (idle) -> starting conversation")
             self._button_press_time = time.time()
             self._holding = True
+            self._kill_timer = self._start_timer(
+                self.KILL_PRESS_SEC, self._on_kill_press
+            )
             self.start_agent()
 
     def _on_button_release_idle(self):
         with self._lock:
+            self._cancel_timer("_kill_timer")
             hold_time = time.time() - self._button_press_time
             print(f"[Button] RELEASED (idle) hold={hold_time:.2f}s")
             self._holding = False
@@ -316,7 +328,7 @@ class VoiceAgentStateMachine:
                     status="thinking",
                     emoji="🤔",
                     text="Let me think...",
-                    rgb=(255, 165, 0),
+                    turn="amber",
                 )
 
     # --- Button handling: ACTIVE state ---
@@ -328,7 +340,7 @@ class VoiceAgentStateMachine:
 
             now = time.time()
             if now - self._last_click_time < self.DOUBLE_CLICK_SEC:
-                print("[Button] Double-click -> pausing")
+                print("[Button] Double-click -> toggling pause")
                 self._last_click_time = 0
                 self._holding = False
                 self._toggle_pause()
@@ -338,7 +350,7 @@ class VoiceAgentStateMachine:
             if self._paused:
                 self._toggle_pause()
 
-            # Silence agent and enable mic
+            # Silence agent and enable mic (push-to-talk)
             if self._agent:
                 self._agent.silence_agent()
                 self._agent.set_input_enabled(True)
@@ -346,28 +358,23 @@ class VoiceAgentStateMachine:
                 status="listening",
                 emoji="🎤",
                 text="I'm listening...",
-                rgb=(0, 255, 0),
+                turn="green",
             )
             self._touch_activity()
 
-            # 2s hold = pause
-            self._pause_timer = self._start_timer(
-                self.PAUSE_HOLD_SEC, self._on_pause_hold
-            )
-            # 5s hold = end conversation
-            self._long_press_timer = self._start_timer(
-                self.LONG_PRESS_SEC, self._on_long_press_active
+            # 3s hold = kill program
+            self._kill_timer = self._start_timer(
+                self.KILL_PRESS_SEC, self._on_kill_press
             )
 
     def _on_button_release_active(self):
         with self._lock:
-            self._cancel_timer("_long_press_timer")
-            self._cancel_timer("_pause_timer")
+            self._cancel_timer("_kill_timer")
 
             self._holding = False
             self._last_click_time = time.time()
 
-            # If pause triggered while held, nothing to do
+            # If paused, just disable mic — don't trigger a response
             if self._paused:
                 if self._agent:
                     self._agent.set_input_enabled(False)
@@ -380,19 +387,12 @@ class VoiceAgentStateMachine:
                 status="thinking",
                 emoji="🤔",
                 text="Let me think...",
-                rgb=(255, 165, 0),
+                turn="amber",
             )
             self._touch_activity()
 
-    def _on_pause_hold(self):
-        """Fired when button is held for 2s — triggers pause."""
-        print("[Button] 2s hold -> pausing")
-        if self._agent:
-            self._agent.set_input_enabled(False)
-        self._toggle_pause()
-
     def _toggle_pause(self):
-        """Toggle pause — mutes mic, silences agent, keeps connected."""
+        """Double-click toggles pause — mutes mic, silences agent, keeps connected."""
         self._paused = not self._paused
         if self._paused:
             print("[Button] Paused")
@@ -403,7 +403,7 @@ class VoiceAgentStateMachine:
                 status="paused",
                 emoji="⏸️",
                 text="Paused — hold button to talk",
-                rgb=(100, 100, 0),
+                turn="paused",
             )
         else:
             print("[Button] Unpaused")
@@ -413,15 +413,15 @@ class VoiceAgentStateMachine:
                 status="ready",
                 emoji="🐷",
                 text=f"{Config.COMPANION_NAME} is here!",
-                rgb=(0, 0, 85),
+                turn="red",
             )
         self._touch_activity()
 
-    def _on_long_press_active(self):
-        print("[Button] Long press (≥5s) -> ending conversation")
-        threading.Thread(
-            target=self._end_conversation, args=("button",), daemon=True
-        ).start()
+    def _on_kill_press(self):
+        """Fired when button is held for 3s — kills the program."""
+        print("[Button] 3s hold -> killing program")
+        import os
+        os._exit(0)
 
     # --- Voice Agent event handler ---
 
@@ -446,7 +446,7 @@ class VoiceAgentStateMachine:
                     status="thinking",
                     emoji="🤔",
                     text="Let me think...",
-                    rgb=(255, 165, 0),
+                    turn="amber",
                 )
 
         elif event_type == "agent_speaking":
@@ -454,7 +454,7 @@ class VoiceAgentStateMachine:
             if not self._holding:
                 self._update_display(
                     status="talking",
-                    rgb=(0, 100, 200),
+                    turn="red",
                 )
 
         elif event_type == "conversation_text":
@@ -487,7 +487,7 @@ class VoiceAgentStateMachine:
             if self.state not in ("game", "music") and not self._holding:
                 self._update_display(
                     status="ready",
-                    rgb=(0, 0, 85),
+                    turn="red",
                 )
 
         elif event_type == "function_call":
@@ -505,7 +505,7 @@ class VoiceAgentStateMachine:
             self._update_display(
                 text=desc,
                 emoji="😟",
-                rgb=(255, 0, 0),
+                turn="red",
                 alert_text="Oops -- hit a snag",
                 alert_level="error",
                 alert_duration=3.2,
@@ -532,6 +532,11 @@ class VoiceAgentStateMachine:
     # --- Display helper ---
 
     def _update_display(self, **kwargs):
+        # If turn is specified, derive RGB from it
+        turn = kwargs.get("turn")
+        if turn and turn in TURN_RGB:
+            kwargs["rgb"] = TURN_RGB[turn]
+
         if "rgb" in kwargs and self.board:
             rgb = kwargs.pop("rgb")
             now = time.time()
@@ -602,7 +607,7 @@ class LegacyStateMachine:
             status="idle",
             emoji="🐷",
             text=kwargs.get("text", "Press and hold to talk to me!"),
-            rgb=(0, 0, 85),
+            turn="sleep",
             scroll_speed=0,
         )
 
@@ -620,7 +625,7 @@ class LegacyStateMachine:
             status="listening",
             emoji="🎤",
             text="I'm listening...",
-            rgb=(0, 255, 0),
+            turn="green",
             scroll_speed=0,
         )
 
@@ -630,7 +635,7 @@ class LegacyStateMachine:
         from services.audio import stop_recording
         print("[State] Release detected, stopping recording...")
         stop_recording()
-        self._update_display(rgb=(255, 165, 0))
+        self._update_display(turn="amber")
         time.sleep(0.2)
 
         if os.path.exists(self._recording_path):
@@ -651,7 +656,7 @@ class LegacyStateMachine:
             status="thinking",
             emoji="🤔",
             text="Let me think...",
-            rgb=(255, 165, 0),
+            turn="amber",
             scroll_speed=0,
         )
 
@@ -692,7 +697,7 @@ class LegacyStateMachine:
         self._update_display(
             status="answering",
             emoji="🐷",
-            rgb=(0, 100, 200),
+            turn="red",
             scroll_speed=3,
         )
 
@@ -820,6 +825,10 @@ class LegacyStateMachine:
         self._set_state("idle", text="That was fun! Want to play again?")
 
     def _update_display(self, **kwargs):
+        turn = kwargs.get("turn")
+        if turn and turn in TURN_RGB:
+            kwargs["rgb"] = TURN_RGB[turn]
+
         if "rgb" in kwargs and self.board:
             r, g, b = kwargs.pop("rgb")
             self.board.set_rgb(r, g, b)

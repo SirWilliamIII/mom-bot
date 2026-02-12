@@ -115,13 +115,13 @@ class TextUtils:
         return lines
 
     @staticmethod
-    def draw_mixed_text(draw, image, text, font, start_xy):
-        img = TextUtils._get_line_image(text, font)
+    def draw_mixed_text(draw, image, text, font, start_xy, fill=(255, 165, 0)):
+        img = TextUtils._get_line_image(text, font, fill)
         image.paste(img, start_xy, img)
 
     @staticmethod
-    def _get_line_image(text, font):
-        key = (font.getname(), font.size, text)
+    def _get_line_image(text, font, fill=(255, 165, 0)):
+        key = (font.getname(), font.size, text, fill)
         if key in _line_image_cache:
             return _line_image_cache[key]
 
@@ -140,7 +140,7 @@ class TextUtils:
                     img.paste(emoji_img, (x, baseline - emoji_img.height), emoji_img)
                     x += emoji_img.width
             else:
-                d.text((x, 0), char, font=font, fill=(255, 165, 0))
+                d.text((x, 0), char, font=font, fill=fill)
                 x += TextUtils.get_char_size(font, char)[0]
 
         _line_image_cache[key] = img

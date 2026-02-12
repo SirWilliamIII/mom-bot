@@ -1,3 +1,4 @@
+import copy
 import os
 import time
 import threading
@@ -10,6 +11,7 @@ from ui.framework import (
     ThemeRegistry,
     alert_color_for_level,
     hint_for_status,
+    infer_turn,
     pulse,
 )
 from ui.utils import ColorUtils, ImageUtils, TextUtils
@@ -17,6 +19,8 @@ from ui.utils import ColorUtils, ImageUtils, TextUtils
 
 class DisplayState:
     def __init__(self):
+        self._lock = threading.Lock()
+        self.turn = "sleep"  # "green" | "red" | "amber" | "sleep" | "paused"
         self.status = "Hello"
         self.emoji = "🐷"
         self.text = "Press and hold to talk to me!"
@@ -35,40 +39,50 @@ class DisplayState:
         self.game_surface = None
 
     def update(self, **kwargs):
-        if "text" in kwargs and kwargs["text"] is not None:
-            new_text = kwargs["text"]
-            if not new_text.startswith(self.text):
-                self.scroll_top = 0
-                TextUtils.clear_cache()
-            self.text = new_text
-        if "status" in kwargs and kwargs["status"] is not None:
-            if kwargs["status"] != self.status:
-                self.status_since = time.time()
-            self.status = kwargs["status"]
-        if "emoji" in kwargs and kwargs["emoji"] is not None:
-            self.emoji = kwargs["emoji"]
-        if "ui_theme" in kwargs and kwargs["ui_theme"] is not None:
-            self.ui_theme = kwargs["ui_theme"]
-        if "battery_level" in kwargs and kwargs["battery_level"] is not None:
-            self.battery_level = kwargs["battery_level"]
-        if "battery_color" in kwargs and kwargs["battery_color"] is not None:
-            self.battery_color = kwargs["battery_color"]
-        if "rgb_color" in kwargs and kwargs["rgb_color"] is not None:
-            self.rgb_color = kwargs["rgb_color"]
-        if "scroll_speed" in kwargs and kwargs["scroll_speed"] is not None:
-            self.scroll_speed = kwargs["scroll_speed"]
-        if "alert_text" in kwargs and kwargs["alert_text"]:
-            self.alert_text = kwargs["alert_text"]
-            self.alert_level = kwargs.get("alert_level", "info")
-            self.alert_until = time.time() + float(kwargs.get("alert_duration", 2.8))
-        if "clear_alert" in kwargs and kwargs["clear_alert"]:
-            self.alert_text = ""
-            self.alert_until = 0.0
-        if "image_path" in kwargs:
-            self.image_path = kwargs["image_path"] or ""
-            self.image_obj = None
-        if "game_surface" in kwargs:
-            self.game_surface = kwargs["game_surface"]
+        with self._lock:
+            if "turn" in kwargs and kwargs["turn"] is not None:
+                self.turn = kwargs["turn"]
+            if "text" in kwargs and kwargs["text"] is not None:
+                new_text = kwargs["text"]
+                if not new_text.startswith(self.text):
+                    self.scroll_top = 0
+                    TextUtils.clear_cache()
+                self.text = new_text
+            if "status" in kwargs and kwargs["status"] is not None:
+                if kwargs["status"] != self.status:
+                    self.status_since = time.time()
+                self.status = kwargs["status"]
+            if "emoji" in kwargs and kwargs["emoji"] is not None:
+                self.emoji = kwargs["emoji"]
+            if "ui_theme" in kwargs and kwargs["ui_theme"] is not None:
+                self.ui_theme = kwargs["ui_theme"]
+            if "battery_level" in kwargs and kwargs["battery_level"] is not None:
+                self.battery_level = kwargs["battery_level"]
+            if "battery_color" in kwargs and kwargs["battery_color"] is not None:
+                self.battery_color = kwargs["battery_color"]
+            if "rgb_color" in kwargs and kwargs["rgb_color"] is not None:
+                self.rgb_color = kwargs["rgb_color"]
+            if "scroll_speed" in kwargs and kwargs["scroll_speed"] is not None:
+                self.scroll_speed = kwargs["scroll_speed"]
+            if "alert_text" in kwargs and kwargs["alert_text"]:
+                self.alert_text = kwargs["alert_text"]
+                self.alert_level = kwargs.get("alert_level", "info")
+                self.alert_until = time.time() + float(kwargs.get("alert_duration", 2.8))
+            if "clear_alert" in kwargs and kwargs["clear_alert"]:
+                self.alert_text = ""
+                self.alert_until = 0.0
+            if "image_path" in kwargs:
+                self.image_path = kwargs["image_path"] or ""
+                self.image_obj = None
+            if "game_surface" in kwargs:
+                self.game_surface = kwargs["game_surface"]
+
+    def snapshot(self):
+        with self._lock:
+            s = copy.copy(self)
+        # Don't copy the lock into the snapshot
+        s._lock = None
+        return s
 
 
 display_state = DisplayState()
@@ -98,7 +112,7 @@ class RenderThread(threading.Thread):
 
         self.line_height = sum(self.main_font.getmetrics())
         self._text_cache_img = None
-        self._cached_text = ""
+        self._cached_text = None  # (text, theme_name) tuple for cache invalidation
 
     def _render_logo(self):
         logo_path = os.path.join("assets", "images", "logo.png")
@@ -126,11 +140,23 @@ class RenderThread(threading.Thread):
     def stop(self):
         self.running = False
 
+    def _hourglass_frame(self) -> str:
+        frames = ["⌛", "⏳"]
+        idx = int(time.time() * 2.8) % len(frames)
+        return frames[idx]
+
+    def _thinking_dots(self) -> str:
+        n = int(time.time() * 2.5) % 4
+        return "THINKING" + "." * n
+
     def _render_frame(self):
-        state = display_state
+        state = display_state.snapshot()
         W = self.board.LCD_WIDTH
         H = self.board.LCD_HEIGHT
-        theme = ThemeRegistry.get(state.ui_theme)
+
+        # Determine turn: explicit if set, else infer from status
+        turn = state.turn or infer_turn(state.status)
+        theme = ThemeRegistry.turn_theme(turn)
         mood = PigletCharacter.mood_for_status(state.status)
 
         if state.game_surface is not None:
@@ -166,7 +192,7 @@ class RenderThread(threading.Thread):
             border=theme.border,
             radius=12,
         )
-        self._render_text_area(text_img, text_h, state, W)
+        self._render_text_area(text_img, text_h, state, W, theme)
         self.board.draw_image(
             0, header_h, W, text_h,
             ImageUtils.image_to_rgb565(text_img, W, text_h),
@@ -203,22 +229,27 @@ class RenderThread(threading.Thread):
         )
 
         TextUtils.draw_mixed_text(
-            draw, image, state.status.upper(), self.status_font, (20, 6)
+            draw, image, state.status.upper(), self.status_font, (20, 6),
+            fill=theme.text_soft,
         )
 
         sub_font = self.battery_font
-        subtitle = mood.subtitle.upper()
+        is_thinking = (state.status or "").lower() in ("thinking", "think")
+        subtitle = self._thinking_dots() if is_thinking else mood.subtitle.upper()
         TextUtils.draw_mixed_text(
             draw,
             image,
             subtitle,
             sub_font,
             (20, 30),
+            fill=theme.text_soft,
         )
 
         self._render_status_glow(draw, image, width, mood)
 
-        emoji_text = state.emoji if state.emoji and state.emoji != "🐷" else mood.emoji
+        emoji_text = self._hourglass_frame() if is_thinking else (
+            state.emoji if state.emoji and state.emoji != "🐷" else mood.emoji
+        )
         emoji_bbox = self.emoji_font.getbbox(emoji_text)
         emoji_w = emoji_bbox[2] - emoji_bbox[0]
         emoji_x = (width - emoji_w) // 2
@@ -270,6 +301,7 @@ class RenderThread(threading.Thread):
             msg,
             self.battery_font,
             (12, 9),
+            fill=theme.text_soft,
         )
         self.board.draw_image(
             0,
@@ -312,7 +344,7 @@ class RenderThread(threading.Thread):
         ty = by + 1
         draw.text((tx, ty), txt, font=self.battery_font, fill=txt_color)
 
-    def _render_text_area(self, image, area_height, state, width):
+    def _render_text_area(self, image, area_height, state, width, theme):
         if not state.text:
             return
 
@@ -330,14 +362,15 @@ class RenderThread(threading.Thread):
                 render_text += line
             y_offset += lh
 
-        if self._cached_text != render_text:
-            self._cached_text = render_text
+        cache_key = (render_text, theme.name)
+        if self._cached_text != cache_key:
+            self._cached_text = cache_key
             cache_h = max(len(display_lines) * lh, 1)
-            self._text_cache_img = Image.new("RGBA", (width, cache_h + lh * 2), (0, 0, 0, 255))
+            self._text_cache_img = Image.new("RGBA", (width, cache_h + lh * 2), theme.panel)
             td = ImageDraw.Draw(self._text_cache_img)
             ry = 0
             for line, _ in display_lines:
-                TextUtils.draw_mixed_text(td, self._text_cache_img, line, self.main_font, (10, ry))
+                TextUtils.draw_mixed_text(td, self._text_cache_img, line, self.main_font, (10, ry), fill=theme.text_soft)
                 ry += lh
 
         if self._text_cache_img:
@@ -345,7 +378,8 @@ class RenderThread(threading.Thread):
 
         total_h = len(lines) * lh
         if state.scroll_speed > 0 and state.scroll_top < total_h - area_height + lh:
-            state.scroll_top += state.scroll_speed
+            # Mutate the real display_state, not the snapshot
+            display_state.scroll_top = state.scroll_top + state.scroll_speed
 
     def _render_image(self, state, W, H):
         if state.image_obj is None and os.path.exists(state.image_path):

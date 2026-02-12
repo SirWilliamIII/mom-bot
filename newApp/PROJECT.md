@@ -54,19 +54,19 @@ DEEPGRAM_TTS_SAMPLE_RATE=16000
 
 ---
 
-## Echo Suppression Architecture (`voice_agent.py`)
+## Push-to-Talk Architecture (`voice_agent.py`)
 
-This was the hardest problem. The speaker audio bleeds into the mic on the Whisplay HAT (they're millimeters apart). Without suppression, Piglet transcribes its own voice as user speech and responds to itself in a loop.
+The speaker and mic are millimeters apart on the Whisplay HAT. Echo suppression is solved by **push-to-talk**: the mic only sends real audio when the user holds the button (`_input_enabled = True`). All other times, silence frames are sent to keep the Deepgram connection alive without leaking speaker audio.
 
-**Solution -- 3-layer approach:**
+**VoiceAgent flags (only 3):**
+- `_input_enabled` -- True when button held, mic sends real audio
+- `_paused` -- True in pause mode, mic sends silence AND agent audio is discarded
+- `_output_suppress_until` -- timestamp; agent audio is buffered (not discarded) until this time, then flushed. Used for the 0.5s response delay after button release.
 
-1. **Mic muting during speech**: `_mic_muted = True` on `AgentStartedSpeaking`. Send loop still drains mic buffer (so arecord doesn't stall) but sends silence frames (`b"\x00" * 1600`) instead of real audio.
-
-2. **Delayed unmute**: `AgentAudioDone` sets `_unmute_at = time.time() + 0.8`. The send loop checks this clock each 50ms cycle and unmutes when the timer expires. The 800ms delay lets the aplay buffer drain so the speaker's tail-end audio doesn't leak into the newly-live mic.
-
-3. **Double-response guard**: `_agent_spoke` flag tracks whether agent has spoken since last `UserStartedSpeaking`. If agent tries to speak again without user input, the entire turn is dropped (audio discarded, events suppressed).
-
-All state management is synchronous in the send loop -- no async threads for timing.
+**State machine threading safety:**
+- `_lock` (RLock) guards all state mutations
+- `_epoch` counter increments on every state transition; stale timer callbacks bail out
+- `_end_conversation` and `_on_long_press_active` run blocking work in separate threads to avoid holding the lock during sleep
 
 ---
 
