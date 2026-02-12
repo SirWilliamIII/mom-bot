@@ -15,20 +15,21 @@ from ui.utils import ColorUtils
 class VoiceAgentStateMachine:
     """State machine for Deepgram Voice Agent mode.
 
-    States:
-        idle    - booting, no connection yet
-        ready   - Voice Agent connected, always listening. Button = slow down.
-        game    - local game running, Voice Agent paused
-        music   - music playing, Voice Agent still active
+    Conversation flow:
+        idle    → long press (1s) → connect agent, send hello → active
+        active  → always listening, agent responds automatically
+                → short click = silence agent immediately
+                → long press (1s) = end conversation → idle
+                → user says 'bye'/'goodbye' = end conversation → idle
+                → 60s no activity = end conversation → idle
+        game    → local game running, agent paused
+        music   → music playing, agent still active
     """
 
-    SLOW_DOWN_MESSAGE = (
-        "[SYSTEM: The user pressed the pause button. Stop talking immediately. "
-        "Take a breath, then ask the user a short, simple question to check in. "
-        "Keep your next response under 2 sentences. Listen more, talk less.]"
-    )
+    BYE_WORDS = {"bye", "goodbye", "ok bye", "good bye", "see ya", "see you", "bye bye"}
+    IDLE_TIMEOUT_SEC = 60
+    LONG_PRESS_SEC = 1.0
 
-    # Minimum seconds between RGB changes to avoid strobe effect
     _RGB_MIN_INTERVAL = 0.4
 
     def __init__(self, board, render_thread):
@@ -42,6 +43,8 @@ class VoiceAgentStateMachine:
         self._long_press_timer = None
         self._current_rgb = None
         self._last_rgb_time = 0
+        self._last_activity_time = 0
+        self._idle_timer = None
 
         from services.audio import set_volume, set_capture_volume
         set_volume(70)
@@ -50,7 +53,6 @@ class VoiceAgentStateMachine:
         self._set_state("idle")
 
     def start_agent(self):
-        """Connect the Voice Agent and transition to ready state."""
         from services.voice_agent import VoiceAgent
 
         self._update_display(
@@ -64,26 +66,86 @@ class VoiceAgentStateMachine:
         self._agent = VoiceAgent(on_event=self._on_agent_event)
         self._agent.set_state_machine(self)
 
-        # Connect in a thread so we don't block the main thread
         def do_connect():
             self._agent.connect()
             if self._agent.is_running:
-                self._set_state("ready")
+                self._set_state("active")
+                self._send_hello()
             else:
                 self._update_display(
                     text="Couldn't connect. Check WiFi?",
                     rgb=(255, 0, 0),
                 )
+                self._set_state("idle")
 
         thread = threading.Thread(target=do_connect, daemon=True)
         thread.start()
 
+    def _send_hello(self):
+        if self._agent:
+            print("[State] Sending hello to start conversation")
+            self._agent.inject_text(
+                "[SYSTEM: The user just started a conversation by pressing the button. "
+                "Greet them warmly and briefly! Keep it to 1-2 sentences.]"
+            )
+            self._touch_activity()
+
+    def _end_conversation(self, reason=""):
+        print(f"[State] Ending conversation: {reason}")
+        if self._agent:
+            if reason != "timeout":
+                self._agent.inject_text(
+                    "[SYSTEM: The conversation is ending. Say a brief, warm goodbye "
+                    "in 1 sentence. Be sweet about it.]"
+                )
+                time.sleep(3)
+            self._agent.disconnect()
+            self._agent = None
+        self._cancel_idle_timer()
+        self._set_state("idle")
+
     def stop(self):
         self.running = False
+        self._cancel_idle_timer()
         if self._agent:
             self._agent.disconnect()
         if self._active_game:
             self._active_game.stop()
+
+    # --- Activity tracking & idle timeout ---
+
+    def _touch_activity(self):
+        self._last_activity_time = time.time()
+        self._restart_idle_timer()
+
+    def _restart_idle_timer(self):
+        self._cancel_idle_timer()
+        self._idle_timer = threading.Timer(
+            self.IDLE_TIMEOUT_SEC, self._on_idle_timeout
+        )
+        self._idle_timer.daemon = True
+        self._idle_timer.start()
+
+    def _cancel_idle_timer(self):
+        if self._idle_timer:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+
+    def _on_idle_timeout(self):
+        if self.state == "active":
+            print(f"[State] No activity for {self.IDLE_TIMEOUT_SEC}s")
+            self._end_conversation("timeout")
+
+    # --- Bye detection ---
+
+    def _check_for_bye(self, text):
+        if not text:
+            return False
+        cleaned = text.lower().strip().rstrip(".!?,")
+        for bye in self.BYE_WORDS:
+            if cleaned == bye or cleaned.endswith(bye):
+                return True
+        return False
 
     # --- State management ---
 
@@ -92,14 +154,13 @@ class VoiceAgentStateMachine:
         self.state = new_state
         print(f"[State] {old} -> {new_state}")
 
-        # Clear button handlers
         if self.board:
             self.board.on_button_press(None)
             self.board.on_button_release(None)
 
         handler = {
             "idle": self._enter_idle,
-            "ready": self._enter_ready,
+            "active": self._enter_active,
             "game": self._enter_game,
             "music": self._enter_music,
         }.get(new_state)
@@ -108,29 +169,34 @@ class VoiceAgentStateMachine:
             handler(**kwargs)
 
     def _enter_idle(self, **kwargs):
-        text = kwargs.get("text", f"{Config.COMPANION_NAME} is waking up...")
+        name = Config.COMPANION_NAME
+        text = kwargs.get("text", f"Hold button to talk to {name}!")
         self._update_display(
-            status="idle",
+            status="sleeping",
             emoji="🐷",
             text=text,
-            rgb=(255, 200, 200),
+            rgb=(50, 20, 50),
             scroll_speed=0,
         )
 
-    def _enter_ready(self, **kwargs):
+        if self.board:
+            self.board.on_button_press(self._on_button_press_idle)
+            self.board.on_button_release(self._on_button_release_idle)
+
+    def _enter_active(self, **kwargs):
         name = Config.COMPANION_NAME
         self._update_display(
             status="ready",
             emoji="🐷",
-            text=kwargs.get("text", f"Talk to {name}!"),
+            text=kwargs.get("text", f"{name} is here!"),
             rgb=(0, 0, 85),
             scroll_speed=0,
         )
+        self._touch_activity()
 
-        # Button: short press = magic slow-down, long press = reconnect
         if self.board:
-            self.board.on_button_press(self._on_button_press)
-            self.board.on_button_release(self._on_button_release)
+            self.board.on_button_press(self._on_button_press_active)
+            self.board.on_button_release(self._on_button_release_active)
 
     def _enter_game(self, **kwargs):
         game = kwargs.get("game")
@@ -153,33 +219,27 @@ class VoiceAgentStateMachine:
             rgb=(255, 105, 180),
             scroll_speed=0,
         )
-        # Button still does slow-down in music mode
+        self._touch_activity()
         if self.board:
-            self.board.on_button_press(self._on_button_press)
-            self.board.on_button_release(self._on_button_release)
+            self.board.on_button_press(self._on_button_press_active)
+            self.board.on_button_release(self._on_button_release_active)
 
     def exit_game(self):
         if self._active_game:
             self._active_game.stop()
             self._active_game = None
         display_state.game_surface = None
-        self._set_state("ready", text="That was fun! Want to play again?")
+        self._set_state("active", text="That was fun! Want to play again?")
 
-    # --- Backlight flash (notification ping) ---
+    # --- Backlight flash ---
 
     _flash_lock = threading.Lock()
-    _flash_active = False
 
     def _flash_backlight(self, times=2, on_ms=80, off_ms=60):
-        """Quick backlight blink so she notices Piglet is talking.
-
-        Runs in a background thread so it doesn't block event handling.
-        Only one flash sequence at a time (skips if already flashing).
-        """
         if not self.board:
             return
         if not self._flash_lock.acquire(blocking=False):
-            return  # already flashing, skip
+            return
         def _do_flash():
             try:
                 for _ in range(times):
@@ -193,68 +253,58 @@ class VoiceAgentStateMachine:
                 self._flash_lock.release()
         threading.Thread(target=_do_flash, daemon=True).start()
 
-    # --- Magic slow-down button ---
+    # --- Button handling: IDLE state ---
 
-    def _on_button_press(self):
+    def _on_button_press_idle(self):
         self._button_press_time = time.time()
-        # Schedule long-press check
-        self._long_press_timer = threading.Timer(2.0, self._on_long_press)
+
+    def _on_button_release_idle(self):
+        hold_time = time.time() - self._button_press_time
+        if hold_time >= self.LONG_PRESS_SEC:
+            print("[Button] Long press in idle -> starting conversation")
+            self.start_agent()
+
+    # --- Button handling: ACTIVE state ---
+
+    def _on_button_press_active(self):
+        self._button_press_time = time.time()
+        self._long_press_timer = threading.Timer(
+            self.LONG_PRESS_SEC, self._on_long_press_active
+        )
         self._long_press_timer.start()
 
-    def _on_button_release(self):
-        # Cancel long-press timer
+    def _on_button_release_active(self):
         if self._long_press_timer:
             self._long_press_timer.cancel()
             self._long_press_timer = None
 
         hold_time = time.time() - self._button_press_time
-        if hold_time < 2.0:
-            # Short press = magic slow-down button
-            self._magic_button()
+        if hold_time < self.LONG_PRESS_SEC:
+            self._silence_agent()
 
-    def _magic_button(self):
-        """The magic button! Silences the agent immediately, then tells it to chill."""
-        print("[Button] Magic button pressed! Silencing agent...")
+    def _silence_agent(self):
+        print("[Button] Short click -> silencing agent")
+        if self._agent:
+            self._agent.silence_agent()
         self._update_display(
-            text="Shh... I'm listening!",
+            status="ready",
             emoji="🐷",
-            rgb=(255, 150, 200),
-            alert_text="Okay sweetie, slowing down 💗",
-            alert_level="info",
-            alert_duration=2.2,
+            rgb=(0, 0, 85),
         )
-        if self._agent:
-            self._agent.silence_agent(then_inject=self.SLOW_DOWN_MESSAGE)
+        self._touch_activity()
 
-    def _on_long_press(self):
-        """Long press = reconnect the Voice Agent."""
-        print("[Button] Long press detected -- reconnecting...")
-        self._update_display(
-            text="Reconnecting...",
-            emoji="🔄",
-            rgb=(255, 165, 0),
-            alert_text="Reconnecting Piglet...",
-            alert_level="warn",
-            alert_duration=2.8,
-        )
-        if self._agent:
-            self._agent.disconnect()
-            time.sleep(1)
-            self.start_agent()
+    def _on_long_press_active(self):
+        print("[Button] Long press in active -> ending conversation")
+        self._end_conversation("button")
 
     # --- Voice Agent event handler ---
 
     def _on_agent_event(self, event_type, data):
-        """Called from the Voice Agent receiver thread on WebSocket events.
-
-        We keep visual updates calm — only change RGB for meaningful
-        state transitions, and avoid rapid text flicker.
-        """
         if event_type in ("ready", "connected"):
-            pass  # start_agent handles the transition
+            pass
 
         elif event_type == "user_speaking":
-            # Only update if we're not already showing "listening"
+            self._touch_activity()
             if display_state.status != "listening":
                 self._update_display(
                     status="listening",
@@ -264,6 +314,7 @@ class VoiceAgentStateMachine:
                 )
 
         elif event_type == "agent_thinking":
+            self._touch_activity()
             self._update_display(
                 status="thinking",
                 emoji="🤔",
@@ -272,7 +323,7 @@ class VoiceAgentStateMachine:
             )
 
         elif event_type == "agent_speaking":
-            # Just set status, don't flash the text
+            self._touch_activity()
             if display_state.status != "talking":
                 self._update_display(
                     status="talking",
@@ -282,19 +333,30 @@ class VoiceAgentStateMachine:
         elif event_type == "conversation_text":
             role = data.get("role", "")
             content = data.get("content", "")
+
+            if role == "user" and content:
+                self._touch_activity()
+                if self._check_for_bye(content):
+                    print(f"[State] Bye detected in: '{content}'")
+                    threading.Thread(
+                        target=self._end_conversation,
+                        args=("bye",),
+                        daemon=True,
+                    ).start()
+                    return
+
             if role == "assistant" and content:
-                # Quick backlight flash so she notices Piglet is responding
+                self._touch_activity()
                 self._flash_backlight(times=2)
                 emojis = _extract_emojis(content)
-                # Update text only (no RGB change) to avoid flicker
                 self._update_display(
                     text=content,
                     emoji=emojis or "🐷",
                     scroll_speed=3,
                 )
-            # Skip displaying user text — it's noisy with streaming partials
 
         elif event_type == "agent_audio_done":
+            self._touch_activity()
             if self.state not in ("game", "music"):
                 self._update_display(
                     status="ready",
@@ -302,6 +364,7 @@ class VoiceAgentStateMachine:
                 )
 
         elif event_type == "function_call":
+            self._touch_activity()
             name = data.get("name", "")
             self._update_display(
                 text=f"Doing: {name}...",
@@ -316,18 +379,17 @@ class VoiceAgentStateMachine:
                 text=desc,
                 emoji="😟",
                 rgb=(255, 0, 0),
-                alert_text="Oops — I hit a snag",
+                alert_text="Oops -- hit a snag",
                 alert_level="error",
                 alert_duration=3.2,
             )
 
         elif event_type == "disconnected":
             reason = data.get("reason", "")
-            if self.running and reason:
-                # Unexpected disconnect -- try to reconnect
+            if self.running and self.state == "active" and reason:
                 print(f"[State] Unexpected disconnect: {reason}, reconnecting...")
                 self._update_display(
-                    alert_text="Connection dropped — retrying",
+                    alert_text="Connection dropped -- retrying",
                     alert_level="warn",
                     alert_duration=3.0,
                 )
@@ -340,7 +402,6 @@ class VoiceAgentStateMachine:
         if "rgb" in kwargs and self.board:
             rgb = kwargs.pop("rgb")
             now = time.time()
-            # Only change RGB if it's a different color AND enough time has passed
             if rgb != self._current_rgb and (now - self._last_rgb_time) >= self._RGB_MIN_INTERVAL:
                 self._current_rgb = rgb
                 self._last_rgb_time = now
