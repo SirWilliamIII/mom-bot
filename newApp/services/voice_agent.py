@@ -50,6 +50,7 @@ class VoiceAgent:
         self._agent_spoke = False # True after agent speaks; reset when user speaks
         self._dropping_turn = False  # True = actively suppressing a double-response
         self._force_listen = False   # True = button held, speaker muted, mic live
+        self._paused = False         # True = pause mode, mic sends silence
 
     @property
     def is_running(self):
@@ -228,10 +229,21 @@ class VoiceAgent:
             self._mic_muted = False
             self._unmute_at = 0
             self._dropping_turn = True
+            self._paused = False  # unpause mic if force-listening
             print("[VoiceAgent] Force-listen ON (speaker muted, mic live)")
         else:
             self._dropping_turn = False
             print("[VoiceAgent] Force-listen OFF")
+
+    def set_paused(self, paused):
+        """Mute/unmute the mic entirely (pause mode). Agent stays connected."""
+        self._paused = paused
+        if paused:
+            self._mic_muted = True
+            self._unmute_at = 0
+            print("[VoiceAgent] Mic paused (sending silence)")
+        else:
+            print("[VoiceAgent] Mic unpaused")
 
     def send_keep_alive(self):
         """Send keepalive to prevent timeout."""
@@ -245,8 +257,8 @@ class VoiceAgent:
 
     # Silence frame: same size as a mic chunk but all zeros
     _SILENCE = b"\x00" * MIC_CHUNK_BYTES
-    _ECHO_GATE_RMS = 800
-    _ECHO_GATE_DURATION = 3.0
+    _ECHO_GATE_RMS = 1500
+    _ECHO_GATE_DURATION = 4.0
 
     @staticmethod
     def _rms(pcm_bytes):
@@ -260,7 +272,10 @@ class VoiceAgent:
     def _send_loop(self):
         """Read mic audio and send as binary WebSocket frames.
 
-        Echo suppression layers:
+        Push-to-talk: mic only sends real audio when _force_listen is True
+        (button held). All other times, silence is sent to prevent echo loops.
+
+        Additional echo suppression when mic is live:
         1. Hard mute while agent is speaking (_mic_muted)
         2. After unmute, energy gate for _ECHO_GATE_DURATION seconds:
            only send audio if RMS > _ECHO_GATE_RMS (real speech),
@@ -282,7 +297,9 @@ class VoiceAgent:
                     print("[VoiceAgent] Mic unmuted -> energy gate active")
 
                 send_chunk = chunk
-                if self._mic_muted:
+                # Push-to-talk: mic is only live when button is held (_force_listen)
+                # Otherwise send silence to prevent echo loops
+                if self._paused or self._mic_muted or not self._force_listen:
                     send_chunk = self._SILENCE
                 elif time.time() < gate_until:
                     rms = self._rms(chunk)
@@ -334,8 +351,8 @@ class VoiceAgent:
 
     def _handle_audio(self, data):
         """Write audio bytes to the aplay stdin pipe."""
-        if self._dropping_turn or self._force_listen:
-            return  # discard: user is talking (force_listen) or suppressed double-response
+        if self._dropping_turn or self._force_listen or self._paused:
+            return  # discard: user talking, suppressed turn, or paused
 
         self._audio_bytes_received += len(data)
 

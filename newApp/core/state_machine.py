@@ -19,7 +19,7 @@ class VoiceAgentStateMachine:
         idle    → user holds button and speaks → connect agent → active
         active  → user holds button while speaking (push-to-talk)
                 → bot waits at least 1s before responding after user releases
-                → double-click = pause (no user talking, agent stays connected)
+                → double-click OR hold ≥2s = pause (no user talking, agent stays connected)
                 → long press (≥5s) = end conversation → idle
                 → user says 'bye'/'goodbye' = end conversation → idle
                 → 60s no activity = end conversation → idle
@@ -29,6 +29,7 @@ class VoiceAgentStateMachine:
 
     BYE_WORDS = {"bye", "goodbye", "ok bye", "good bye", "see ya", "see you", "bye bye"}
     IDLE_TIMEOUT_SEC = 60
+    PAUSE_HOLD_SEC = 2.0
     LONG_PRESS_SEC = 5.0
     DOUBLE_CLICK_SEC = 0.4
     RESPONSE_DELAY_SEC = 1.0
@@ -52,6 +53,7 @@ class VoiceAgentStateMachine:
         self._holding = False
         self._paused = False
         self._response_delay_timer = None
+        self._pause_timer = None
 
         from services.audio import set_volume, set_capture_volume
         set_volume(70)
@@ -105,6 +107,7 @@ class VoiceAgentStateMachine:
         self.running = False
         self._cancel_idle_timer()
         self._cancel_response_delay()
+        self._cancel_pause_timer()
         if self._agent:
             self._agent.disconnect()
         if self._active_game:
@@ -302,6 +305,14 @@ class VoiceAgentStateMachine:
         )
         self._touch_activity()
 
+        # 2s hold = pause (same as double-click)
+        self._cancel_pause_timer()
+        self._pause_timer = threading.Timer(
+            self.PAUSE_HOLD_SEC, self._on_pause_hold
+        )
+        self._pause_timer.daemon = True
+        self._pause_timer.start()
+
         self._long_press_timer = threading.Timer(
             self.LONG_PRESS_SEC, self._on_long_press_active
         )
@@ -311,9 +322,16 @@ class VoiceAgentStateMachine:
         if self._long_press_timer:
             self._long_press_timer.cancel()
             self._long_press_timer = None
+        self._cancel_pause_timer()
 
         self._holding = False
         self._last_click_time = time.time()
+
+        # If pause fired while held, don't schedule a response
+        if self._paused:
+            if self._agent:
+                self._agent.force_listen(False)
+            return
 
         if self._agent:
             self._agent.force_listen(False)
@@ -353,13 +371,28 @@ class VoiceAgentStateMachine:
                 rgb=(0, 0, 85),
             )
 
+    def _on_pause_hold(self):
+        """Fired when button is held for 2s — triggers pause (same as double-click)."""
+        print("[Button] 2s hold -> pausing (no user talking)")
+        self._pause_timer = None
+        # Stop listening while we transition to paused
+        if self._agent:
+            self._agent.force_listen(False)
+        self._toggle_pause()
+
+    def _cancel_pause_timer(self):
+        if self._pause_timer:
+            self._pause_timer.cancel()
+            self._pause_timer = None
+
     def _toggle_pause(self):
-        """Double-click toggles pause — mutes user mic but keeps agent connected."""
+        """Double-click or 2s hold toggles pause — mutes mic, silences agent, keeps connected."""
         self._paused = not self._paused
         if self._paused:
             print("[Button] Paused (muted)")
             if self._agent:
-                self._agent.force_listen(False)
+                self._agent.silence_agent()
+                self._agent.set_paused(True)
             self._update_display(
                 status="paused",
                 emoji="⏸️",
@@ -368,6 +401,8 @@ class VoiceAgentStateMachine:
             )
         else:
             print("[Button] Unpaused")
+            if self._agent:
+                self._agent.set_paused(False)
             self._update_display(
                 status="ready",
                 emoji="🐷",
