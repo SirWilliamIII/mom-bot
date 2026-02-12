@@ -151,7 +151,7 @@ class VoiceAgent:
         self._on_event("disconnected", {})
 
     def inject_user_message(self, text):
-        """Inject text as if the user said it (for the magic slow-down button)."""
+        """Inject text as if the agent said it. Only works when agent is idle."""
         if self._ws and self._running:
             msg = {"type": "InjectAgentMessage", "message": text}
             try:
@@ -159,6 +159,38 @@ class VoiceAgent:
                 print(f"[VoiceAgent] Injected message: {text[:60]}")
             except Exception as e:
                 print(f"[VoiceAgent] Inject failed: {e}")
+
+    def silence_agent(self, then_inject=None):
+        """Immediately kill speaker output, then optionally inject a message.
+
+        This is the 'tranquilo' button: cuts audio locally so the agent
+        shuts up right away, then (after a brief pause for the server to
+        finish its current audio stream) injects a calming instruction.
+        """
+        print("[VoiceAgent] Silencing agent (button pressed)...")
+
+        # 1. Kill the speaker process — instant silence
+        if self._speaker_proc and self._speaker_proc.poll() is None:
+            try:
+                self._speaker_proc.stdin.close()
+            except Exception:
+                pass
+            self._speaker_proc.terminate()
+        self._speaker_proc = None
+
+        # 2. Restart a fresh speaker pipe so future audio still plays
+        self._speaker_proc = start_playback_stream(
+            sample_rate=Config.DEEPGRAM_TTS_SAMPLE_RATE
+        )
+
+        # 3. After a short delay, inject the follow-up message
+        #    (gives the server time to finish its current audio burst
+        #     so InjectAgentMessage won't get InjectionRefused)
+        if then_inject:
+            def _delayed_inject():
+                time.sleep(1.5)
+                self.inject_user_message(then_inject)
+            threading.Thread(target=_delayed_inject, daemon=True).start()
 
     def update_prompt(self, new_prompt):
         """Update the system prompt mid-conversation."""
@@ -319,9 +351,12 @@ class VoiceAgent:
             })
 
         elif msg_type in ("PromptUpdated", "SpeakUpdated", "History",
-                          "FunctionCallResponse"):
-            # FunctionCallResponse = our own response echoed back, safe to ignore
+                          "FunctionCallResponse", "InjectionRefused"):
+            # FunctionCallResponse = our own response echoed back
+            # InjectionRefused = tried to inject while agent was speaking (expected)
             # History = conversation history replay on reconnect
+            if msg_type == "InjectionRefused":
+                print("[VoiceAgent] Injection refused (agent busy), will retry")
             pass
 
         else:

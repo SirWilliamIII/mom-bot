@@ -23,8 +23,9 @@ class VoiceAgentStateMachine:
     """
 
     SLOW_DOWN_MESSAGE = (
-        "Oh wait, let me slow down! I think I was going a bit fast there. "
-        "Let me repeat what I just said, but simpler and slower this time."
+        "[SYSTEM: The user pressed the pause button. Stop talking immediately. "
+        "Take a breath, then ask the user a short, simple question to check in. "
+        "Keep your next response under 2 sentences. Listen more, talk less.]"
     )
 
     # Minimum seconds between RGB changes to avoid strobe effect
@@ -184,15 +185,15 @@ class VoiceAgentStateMachine:
             self._magic_button()
 
     def _magic_button(self):
-        """The magic slow-down button! Inject a message to make Piglet repeat/simplify."""
-        print("[Button] Magic button pressed! Injecting slow-down message...")
+        """The magic button! Silences the agent immediately, then tells it to chill."""
+        print("[Button] Magic button pressed! Silencing agent...")
         self._update_display(
-            text="OK OK, let me try again!",
+            text="Shh... I'm listening!",
             emoji="🐷",
             rgb=(255, 150, 200),
         )
         if self._agent:
-            self._agent.inject_user_message(self.SLOW_DOWN_MESSAGE)
+            self._agent.silence_agent(then_inject=self.SLOW_DOWN_MESSAGE)
 
     def _on_long_press(self):
         """Long press = reconnect the Voice Agent."""
