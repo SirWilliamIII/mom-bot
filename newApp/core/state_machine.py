@@ -25,11 +25,15 @@ class VoiceAgentStateMachine:
     """State machine for Deepgram Voice Agent mode.
 
     Conversation flow:
-        idle    → user holds button and speaks → connect agent → active
+        asleep  → screen off, LED off, process alive, button polling active
+                → double-click = wake up → idle
+        idle    → showing sleep screen, waiting for user
+                → hold button = connect agent + start talking → active
+                → 2 min idle = deep sleep → asleep
         active  → hold button = push-to-talk (mic live while held)
                 → release button = agent responds after 0.5s delay
                 → double-click = end conversation → idle
-                → hold ≥10s = kill program
+                → hold ≥10s = deep sleep (screen off, process alive)
                 → user says 'bye'/'goodbye' = end conversation → idle
                 → 30s no activity = end conversation → idle
         game    → local game running, agent paused
@@ -43,6 +47,7 @@ class VoiceAgentStateMachine:
 
     BYE_WORDS = {"bye", "goodbye", "ok bye", "good bye", "see ya", "see you", "bye bye"}
     IDLE_TIMEOUT_SEC = 30
+    IDLE_SLEEP_SEC = 120     # 2 min idle → deep sleep
     KILL_PRESS_SEC = 10.0
     DOUBLE_CLICK_SEC = 0.4
     RESPONSE_DELAY_SEC = 0.5
@@ -216,6 +221,7 @@ class VoiceAgentStateMachine:
             "active": self._enter_active,
             "game": self._enter_game,
             "music": self._enter_music,
+            "asleep": self._enter_asleep,
         }.get(new_state)
 
         if handler:
@@ -223,7 +229,7 @@ class VoiceAgentStateMachine:
 
     def _enter_idle(self, **kwargs):
         name = Config.COMPANION_NAME
-        text = kwargs.get("text", f"Hold button and talk to {name}!")
+        text = kwargs.get("text", f"Double-tap to talk to {name}!")
         self._update_display(
             status="sleeping",
             emoji="🐷",
@@ -234,6 +240,10 @@ class VoiceAgentStateMachine:
         if self.board:
             self.board.on_button_press(self._on_button_press_idle)
             self.board.on_button_release(self._on_button_release_idle)
+        # Auto-sleep after 2 min idle
+        self._idle_timer = self._start_timer(
+            self.IDLE_SLEEP_SEC, self._on_idle_sleep
+        )
 
     def _enter_active(self, **kwargs):
         name = Config.COMPANION_NAME
@@ -285,6 +295,60 @@ class VoiceAgentStateMachine:
             display_state.game_surface = None
             self._set_state("active", text="That was fun! Want to play again?")
 
+    # --- Deep sleep (screen off, process alive) ---
+
+    def _enter_asleep(self, **kwargs):
+        """Deep sleep: screen off, LED off, process stays alive.
+
+        Button polling continues — double-click wakes back to idle.
+        """
+        self._holding = False
+        # Stop rendering
+        if self.render_thread:
+            self.render_thread.running = False
+        # Go dark
+        if self.board:
+            self.board.set_rgb(0, 0, 0)
+            self.board.fill_screen(0x0000)
+            self.board.set_backlight(0)
+        print("[State] Deep sleep — double-click to wake")
+        # Register wake-up button handler (double-click only)
+        self._last_click_time = 0
+        if self.board:
+            self.board.on_button_press(self._on_button_press_asleep)
+
+    def _on_button_press_asleep(self):
+        """Double-click in deep sleep wakes the device."""
+        with self._lock:
+            now = time.time()
+            if now - self._last_click_time < self.DOUBLE_CLICK_SEC:
+                print("[Button] Double-click (asleep) -> waking up")
+                self._last_click_time = 0
+                self._wake_up()
+            else:
+                self._last_click_time = now
+
+    def _wake_up(self):
+        """Restart the render thread and go to idle."""
+        if self.board:
+            self.board.set_backlight(100)
+        # Spin up a fresh render thread (old one exited its loop)
+        if self.render_thread:
+            new_render = RenderThread(
+                self.render_thread.board,
+                self.render_thread.font_path,
+                self.render_thread.fps,
+            )
+            new_render.start()
+            self.render_thread = new_render
+        self._set_state("idle")
+
+    def _on_idle_sleep(self):
+        """Idle screen too long — go to deep sleep to save power."""
+        if self.state == "idle":
+            print(f"[State] Idle for {self.IDLE_SLEEP_SEC}s -> deep sleep")
+            self._set_state("asleep")
+
     # --- Backlight flash ---
 
     _flash_lock = threading.Lock()
@@ -313,20 +377,23 @@ class VoiceAgentStateMachine:
 
     def _on_button_press_idle(self):
         with self._lock:
-            print("[Button] PRESSED (idle) -> starting conversation")
-            self._button_press_time = time.time()
-            self._holding = True
-            self._kill_timer = self._start_timer(
-                self.KILL_PRESS_SEC, self._on_kill_press
-            )
-            self.start_agent()
+            now = time.time()
+            if now - self._last_click_time < self.DOUBLE_CLICK_SEC:
+                # Double-click in idle → start conversation
+                print("[Button] Double-click (idle) -> starting conversation")
+                self._last_click_time = 0
+                self._button_press_time = now
+                self._holding = True
+                self.start_agent()
+            else:
+                self._last_click_time = now
+                self._button_press_time = now
 
     def _on_button_release_idle(self):
         with self._lock:
-            self._cancel_timer("_kill_timer")
-            hold_time = time.time() - self._button_press_time
-            print(f"[Button] RELEASED (idle) hold={hold_time:.2f}s")
             self._holding = False
+            # If agent is connecting/connected (started by double-click),
+            # release means stop talking → agent responds
             if self._agent:
                 self._agent.set_input_enabled(False)
                 self._agent.suppress_output_for(self.RESPONSE_DELAY_SEC)
@@ -368,7 +435,7 @@ class VoiceAgentStateMachine:
             )
             self._touch_activity()
 
-            # 10s hold = kill program
+            # 10s hold = deep sleep
             self._kill_timer = self._start_timer(
                 self.KILL_PRESS_SEC, self._on_kill_press
             )
@@ -392,10 +459,14 @@ class VoiceAgentStateMachine:
             self._touch_activity()
 
     def _on_kill_press(self):
-        """Fired when button is held for 10s — kills the program."""
-        print("[Button] 10s hold -> killing program")
-        import os
-        os._exit(0)
+        """Fired when button is held for 10s — enters deep sleep."""
+        print("[Button] 10s hold -> deep sleep")
+        # Disconnect agent in a thread (blocking work)
+        agent = self._agent
+        self._agent = None
+        if agent:
+            threading.Thread(target=agent.disconnect, daemon=True).start()
+        self._set_state("asleep")
 
     # --- Voice Agent event handler ---
 

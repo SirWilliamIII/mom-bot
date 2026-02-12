@@ -190,7 +190,7 @@ def alert_color_for_level(theme: UITheme, level: str):
 def hint_for_status(status: str) -> str:
     status = (status or "").lower()
     if status in ("sleeping", "idle", "sleep"):
-        return "Hold button to start talking"
+        return "Double-tap to start talking"
     if status in ("ready", "wait"):
         return "Hold to talk · 2x tap to end"
     if status == "listening":
