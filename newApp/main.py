@@ -142,9 +142,8 @@ def main():
     signal.signal(signal.SIGTERM, cleanup)
     signal.signal(signal.SIGINT, cleanup)
 
-    # Start Voice Agent if in that mode
-    if Config.VOICE_AGENT_MODE:
-        sm.start_agent()
+    # Voice Agent mode: agent starts on long press (1s), not at boot.
+    # Legacy mode: button press/release handled entirely by the state machine.
 
     try:
         while True:

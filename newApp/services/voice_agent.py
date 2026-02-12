@@ -383,8 +383,8 @@ class VoiceAgent:
                 return
             # Schedule unmute after a delay — aplay buffer still has audio
             # queued after Deepgram says done. The send loop checks the clock.
-            self._unmute_at = time.time() + 0.8
-            print("[VoiceAgent] Agent audio done [mic unmutes in 800ms]")
+            self._unmute_at = time.time() + 1.2
+            print("[VoiceAgent] Agent audio done [mic unmutes in 1200ms]")
             self._on_event("agent_audio_done", {})
 
         elif msg_type == "FunctionCallRequest":
