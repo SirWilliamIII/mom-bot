@@ -84,7 +84,7 @@ class VoiceAgentStateMachine:
     def _send_hello(self):
         if self._agent:
             print("[State] Sending hello to start conversation")
-            self._agent.inject_text(
+            self._agent.inject_user_message(
                 "[SYSTEM: The user just started a conversation by pressing the button. "
                 "Greet them warmly and briefly! Keep it to 1-2 sentences.]"
             )
@@ -94,7 +94,7 @@ class VoiceAgentStateMachine:
         print(f"[State] Ending conversation: {reason}")
         if self._agent:
             if reason != "timeout":
-                self._agent.inject_text(
+                self._agent.inject_user_message(
                     "[SYSTEM: The conversation is ending. Say a brief, warm goodbye "
                     "in 1 sentence. Be sweet about it.]"
                 )
