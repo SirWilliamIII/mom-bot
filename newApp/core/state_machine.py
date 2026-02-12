@@ -2,7 +2,6 @@ import os
 import time
 import threading
 import tempfile
-import re
 
 from config import Config
 from core.conversation import Conversation
@@ -19,12 +18,17 @@ class VoiceAgentStateMachine:
         idle    → user holds button and speaks → connect agent → active
         active  → user holds button while speaking (push-to-talk)
                 → agent waits 0.5s after button release before responding
-                → double-click OR hold ≥2s = pause (no user talking, agent stays connected)
+                → double-click OR hold ≥2s = pause (mic muted, agent connected)
                 → long press (≥5s) = end conversation → idle
                 → user says 'bye'/'goodbye' = end conversation → idle
                 → 60s no activity = end conversation → idle
         game    → local game running, agent paused
         music   → music playing, agent still active
+
+    Threading safety:
+        All state mutations and timer callbacks are guarded by self._lock.
+        Every timer callback captures an epoch at creation time and bails
+        if the epoch has changed (meaning a state transition happened).
     """
 
     BYE_WORDS = {"bye", "goodbye", "ok bye", "good bye", "see ya", "see you", "bye bye"}
@@ -39,27 +43,59 @@ class VoiceAgentStateMachine:
     def __init__(self, board, render_thread):
         self.board = board
         self.render_thread = render_thread
+        self._lock = threading.RLock()
+        self._epoch = 0           # incremented on every state change; stale timers bail out
         self.state = "idle"
         self.running = True
         self._active_game = None
         self._agent = None
         self._button_press_time = 0
-        self._long_press_timer = None
-        self._current_rgb = None
-        self._last_rgb_time = 0
-        self._last_activity_time = 0
-        self._idle_timer = None
-        self._last_click_time = 0
         self._holding = False
         self._paused = False
-        self._response_delay_timer = None
+        self._last_click_time = 0
+        self._current_rgb = None
+        self._last_rgb_time = 0
+
+        # Timers (all guarded by epoch)
+        self._long_press_timer = None
         self._pause_timer = None
+        self._idle_timer = None
 
         from services.audio import set_volume, set_capture_volume
         set_volume(70)
         set_capture_volume(100)
 
         self._set_state("idle")
+
+    # --- Timer helpers (epoch-safe) ---
+
+    def _start_timer(self, seconds, callback):
+        """Create a daemon timer that checks epoch before firing."""
+        my_epoch = self._epoch
+
+        def _guarded():
+            with self._lock:
+                if self._epoch != my_epoch or not self.running:
+                    return
+                callback()
+
+        t = threading.Timer(seconds, _guarded)
+        t.daemon = True
+        t.start()
+        return t
+
+    def _cancel_timer(self, attr_name):
+        """Cancel a timer stored in self.<attr_name>."""
+        timer = getattr(self, attr_name, None)
+        if timer:
+            timer.cancel()
+            setattr(self, attr_name, None)
+
+    def _cancel_all_timers(self):
+        for name in ("_long_press_timer", "_pause_timer", "_idle_timer"):
+            self._cancel_timer(name)
+
+    # --- Agent lifecycle ---
 
     def start_agent(self):
         from services.voice_agent import VoiceAgent
@@ -77,39 +113,44 @@ class VoiceAgentStateMachine:
 
         def do_connect():
             self._agent.connect()
-            if self._agent.is_running:
-                # User is holding button — suppress greeting, mic is live
-                self._agent.force_listen(True)
+            with self._lock:
+                if not self._agent or not self._agent.is_running:
+                    self._update_display(
+                        text="Couldn't connect. Check WiFi?",
+                        rgb=(255, 0, 0),
+                    )
+                    self._set_state("idle")
+                    return
+                # Check actual button state at connect time
+                if self._holding:
+                    self._agent.set_input_enabled(True)
+                else:
+                    self._agent.set_input_enabled(False)
+                    self._agent.suppress_output_for(self.RESPONSE_DELAY_SEC)
                 self._set_state("active")
-            else:
-                self._update_display(
-                    text="Couldn't connect. Check WiFi?",
-                    rgb=(255, 0, 0),
-                )
-                self._set_state("idle")
 
-        thread = threading.Thread(target=do_connect, daemon=True)
-        thread.start()
+        threading.Thread(target=do_connect, daemon=True).start()
 
     def _end_conversation(self, reason=""):
-        print(f"[State] Ending conversation: {reason}")
-        if self._agent:
+        with self._lock:
+            print(f"[State] Ending conversation: {reason}")
+            agent = self._agent
+            self._agent = None
+        if agent:
             if reason != "timeout":
-                self._agent.inject_user_message(
+                agent.inject_user_message(
                     "[SYSTEM: The conversation is ending. Say a brief, warm goodbye "
                     "in 1 sentence. Be sweet about it.]"
                 )
                 time.sleep(3)
-            self._agent.disconnect()
-            self._agent = None
-        self._cancel_idle_timer()
-        self._set_state("idle")
+            agent.disconnect()
+        with self._lock:
+            self._set_state("idle")
 
     def stop(self):
-        self.running = False
-        self._cancel_idle_timer()
-        self._cancel_response_delay()
-        self._cancel_pause_timer()
+        with self._lock:
+            self.running = False
+            self._cancel_all_timers()
         if self._agent:
             self._agent.disconnect()
         if self._active_game:
@@ -118,26 +159,20 @@ class VoiceAgentStateMachine:
     # --- Activity tracking & idle timeout ---
 
     def _touch_activity(self):
-        self._last_activity_time = time.time()
         self._restart_idle_timer()
 
     def _restart_idle_timer(self):
-        self._cancel_idle_timer()
-        self._idle_timer = threading.Timer(
+        self._cancel_timer("_idle_timer")
+        self._idle_timer = self._start_timer(
             self.IDLE_TIMEOUT_SEC, self._on_idle_timeout
         )
-        self._idle_timer.daemon = True
-        self._idle_timer.start()
-
-    def _cancel_idle_timer(self):
-        if self._idle_timer:
-            self._idle_timer.cancel()
-            self._idle_timer = None
 
     def _on_idle_timeout(self):
         if self.state == "active":
             print(f"[State] No activity for {self.IDLE_TIMEOUT_SEC}s")
-            self._end_conversation("timeout")
+            threading.Thread(
+                target=self._end_conversation, args=("timeout",), daemon=True
+            ).start()
 
     # --- Bye detection ---
 
@@ -145,16 +180,16 @@ class VoiceAgentStateMachine:
         if not text:
             return False
         cleaned = text.lower().strip().rstrip(".!?,")
-        for bye in self.BYE_WORDS:
-            if cleaned == bye or cleaned.endswith(bye):
-                return True
-        return False
+        return any(cleaned == bye or cleaned.endswith(bye) for bye in self.BYE_WORDS)
 
     # --- State management ---
 
     def _set_state(self, new_state, **kwargs):
+        """Transition to a new state. Caller should hold self._lock."""
         old = self.state
         self.state = new_state
+        self._epoch += 1
+        self._cancel_all_timers()
         print(f"[State] {old} -> {new_state}")
 
         if self.board:
@@ -172,6 +207,7 @@ class VoiceAgentStateMachine:
             handler(**kwargs)
 
     def _enter_idle(self, **kwargs):
+        self._paused = False
         name = Config.COMPANION_NAME
         text = kwargs.get("text", f"Hold button and talk to {name}!")
         self._update_display(
@@ -181,22 +217,22 @@ class VoiceAgentStateMachine:
             rgb=(50, 20, 50),
             scroll_speed=0,
         )
-
         if self.board:
             self.board.on_button_press(self._on_button_press_idle)
             self.board.on_button_release(self._on_button_release_idle)
 
     def _enter_active(self, **kwargs):
         name = Config.COMPANION_NAME
-        self._update_display(
-            status="ready",
-            emoji="🐷",
-            text=kwargs.get("text", f"{name} is here!"),
-            rgb=(0, 0, 85),
-            scroll_speed=0,
-        )
+        # Don't overwrite "listening" display if user is still holding button
+        if not self._holding:
+            self._update_display(
+                status="ready",
+                emoji="🐷",
+                text=kwargs.get("text", f"{name} is here!"),
+                rgb=(0, 0, 85),
+                scroll_speed=0,
+            )
         self._touch_activity()
-
         if self.board:
             self.board.on_button_press(self._on_button_press_active)
             self.board.on_button_release(self._on_button_release_active)
@@ -228,11 +264,12 @@ class VoiceAgentStateMachine:
             self.board.on_button_release(self._on_button_release_active)
 
     def exit_game(self):
-        if self._active_game:
-            self._active_game.stop()
-            self._active_game = None
-        display_state.game_surface = None
-        self._set_state("active", text="That was fun! Want to play again?")
+        with self._lock:
+            if self._active_game:
+                self._active_game.stop()
+                self._active_game = None
+            display_state.game_surface = None
+            self._set_state("active", text="That was fun! Want to play again?")
 
     # --- Backlight flash ---
 
@@ -243,6 +280,7 @@ class VoiceAgentStateMachine:
             return
         if not self._flash_lock.acquire(blocking=False):
             return
+
         def _do_flash():
             try:
                 for _ in range(times):
@@ -254,144 +292,110 @@ class VoiceAgentStateMachine:
                 print(f"[Flash] Error: {e}")
             finally:
                 self._flash_lock.release()
+
         threading.Thread(target=_do_flash, daemon=True).start()
 
     # --- Button handling: IDLE state ---
 
     def _on_button_press_idle(self):
-        """User holds button and speaks to initiate conversation."""
-        print("[Button] PRESSED (idle) -> starting conversation")
-        self._button_press_time = time.time()
-        self._holding = True
-        self.start_agent()
+        with self._lock:
+            print("[Button] PRESSED (idle) -> starting conversation")
+            self._button_press_time = time.time()
+            self._holding = True
+            self.start_agent()
 
     def _on_button_release_idle(self):
-        hold_time = time.time() - self._button_press_time
-        print(f"[Button] RELEASED (idle) hold={hold_time:.2f}s")
-        self._holding = False
-        # Agent is connecting/connected; release triggers response delay
-        if self._agent:
-            self._agent.force_listen(False)
-            self._schedule_response_delay()
+        with self._lock:
+            hold_time = time.time() - self._button_press_time
+            print(f"[Button] RELEASED (idle) hold={hold_time:.2f}s")
+            self._holding = False
+            if self._agent:
+                self._agent.set_input_enabled(False)
+                self._agent.suppress_output_for(self.RESPONSE_DELAY_SEC)
+                self._update_display(
+                    status="thinking",
+                    emoji="🤔",
+                    text="Let me think...",
+                    rgb=(255, 165, 0),
+                )
 
     # --- Button handling: ACTIVE state ---
 
     def _on_button_press_active(self):
-        self._button_press_time = time.time()
-        self._holding = True
+        with self._lock:
+            self._button_press_time = time.time()
+            self._holding = True
 
-        # Cancel any pending response delay (user is talking again)
-        self._cancel_response_delay()
+            now = time.time()
+            if now - self._last_click_time < self.DOUBLE_CLICK_SEC:
+                print("[Button] Double-click -> pausing")
+                self._last_click_time = 0
+                self._holding = False
+                self._toggle_pause()
+                return
 
-        now = time.time()
-        if now - self._last_click_time < self.DOUBLE_CLICK_SEC:
-            print("[Button] Double-click -> pausing (no user talking)")
-            self._last_click_time = 0
-            self._holding = False
-            self._toggle_pause()
-            return
+            # Unpause if currently paused
+            if self._paused:
+                self._toggle_pause()
 
-        # If paused, unpause on button press
-        if self._paused:
-            self._toggle_pause()
-
-        # Silence any ongoing agent speech and switch to listening
-        if self._agent:
-            self._agent.silence_agent()
-            self._agent.force_listen(True)
-        self._update_display(
-            status="listening",
-            emoji="🎤",
-            text="I'm listening...",
-            rgb=(0, 255, 0),
-        )
-        self._touch_activity()
-
-        # 2s hold = pause (same as double-click)
-        self._cancel_pause_timer()
-        self._pause_timer = threading.Timer(
-            self.PAUSE_HOLD_SEC, self._on_pause_hold
-        )
-        self._pause_timer.daemon = True
-        self._pause_timer.start()
-
-        self._long_press_timer = threading.Timer(
-            self.LONG_PRESS_SEC, self._on_long_press_active
-        )
-        self._long_press_timer.start()
-
-    def _on_button_release_active(self):
-        if self._long_press_timer:
-            self._long_press_timer.cancel()
-            self._long_press_timer = None
-        self._cancel_pause_timer()
-
-        self._holding = False
-        self._last_click_time = time.time()
-
-        # If pause fired while held, don't schedule a response
-        if self._paused:
+            # Silence agent and enable mic
             if self._agent:
-                self._agent.force_listen(False)
-            return
-
-        if self._agent:
-            self._agent.force_listen(False)
-
-        # Wait at least RESPONSE_DELAY_SEC before bot responds
-        self._schedule_response_delay()
-        self._touch_activity()
-
-    def _schedule_response_delay(self):
-        """Wait at least RESPONSE_DELAY_SEC after user stops talking before bot responds."""
-        self._cancel_response_delay()
-        self._update_display(
-            status="thinking",
-            emoji="🤔",
-            text="Let me think...",
-            rgb=(255, 165, 0),
-        )
-        self._response_delay_timer = threading.Timer(
-            self.RESPONSE_DELAY_SEC, self._on_response_delay_done
-        )
-        self._response_delay_timer.daemon = True
-        self._response_delay_timer.start()
-
-    def _cancel_response_delay(self):
-        timer = getattr(self, "_response_delay_timer", None)
-        if timer:
-            timer.cancel()
-            self._response_delay_timer = None
-
-    def _on_response_delay_done(self):
-        """Response delay elapsed — bot can now respond."""
-        self._response_delay_timer = None
-        if self.state == "active" and not self._holding:
+                self._agent.silence_agent()
+                self._agent.set_input_enabled(True)
             self._update_display(
-                status="ready",
-                emoji="🐷",
-                rgb=(0, 0, 85),
+                status="listening",
+                emoji="🎤",
+                text="I'm listening...",
+                rgb=(0, 255, 0),
+            )
+            self._touch_activity()
+
+            # 2s hold = pause
+            self._pause_timer = self._start_timer(
+                self.PAUSE_HOLD_SEC, self._on_pause_hold
+            )
+            # 5s hold = end conversation
+            self._long_press_timer = self._start_timer(
+                self.LONG_PRESS_SEC, self._on_long_press_active
             )
 
+    def _on_button_release_active(self):
+        with self._lock:
+            self._cancel_timer("_long_press_timer")
+            self._cancel_timer("_pause_timer")
+
+            self._holding = False
+            self._last_click_time = time.time()
+
+            # If pause triggered while held, nothing to do
+            if self._paused:
+                if self._agent:
+                    self._agent.set_input_enabled(False)
+                return
+
+            if self._agent:
+                self._agent.set_input_enabled(False)
+                self._agent.suppress_output_for(self.RESPONSE_DELAY_SEC)
+            self._update_display(
+                status="thinking",
+                emoji="🤔",
+                text="Let me think...",
+                rgb=(255, 165, 0),
+            )
+            self._touch_activity()
+
     def _on_pause_hold(self):
-        """Fired when button is held for 2s — triggers pause (same as double-click)."""
-        print("[Button] 2s hold -> pausing (no user talking)")
-        self._pause_timer = None
-        # Stop listening while we transition to paused
+        """Fired when button is held for 2s — triggers pause."""
+        print("[Button] 2s hold -> pausing")
         if self._agent:
-            self._agent.force_listen(False)
+            self._agent.set_input_enabled(False)
         self._toggle_pause()
 
-    def _cancel_pause_timer(self):
-        if self._pause_timer:
-            self._pause_timer.cancel()
-            self._pause_timer = None
-
     def _toggle_pause(self):
-        """Double-click or 2s hold toggles pause — mutes mic, silences agent, keeps connected."""
+        """Toggle pause — mutes mic, silences agent, keeps connected."""
         self._paused = not self._paused
         if self._paused:
-            print("[Button] Paused (muted)")
+            print("[Button] Paused")
             if self._agent:
                 self._agent.silence_agent()
                 self._agent.set_paused(True)
@@ -414,37 +418,40 @@ class VoiceAgentStateMachine:
         self._touch_activity()
 
     def _on_long_press_active(self):
-        print("[Button] Long press (≥5s) in active -> ending conversation")
-        self._end_conversation("button")
+        print("[Button] Long press (≥5s) -> ending conversation")
+        threading.Thread(
+            target=self._end_conversation, args=("button",), daemon=True
+        ).start()
 
     # --- Voice Agent event handler ---
 
     def _on_agent_event(self, event_type, data):
+        """Called from VoiceAgent receiver thread."""
+        with self._lock:
+            if not self.running or self.state not in ("active", "music", "game"):
+                return
+            self._handle_agent_event(event_type, data)
+
+    def _handle_agent_event(self, event_type, data):
         if event_type in ("ready", "connected"):
             pass
 
         elif event_type == "user_speaking":
             self._touch_activity()
-            if display_state.status != "listening":
-                self._update_display(
-                    status="listening",
-                    emoji="🎤",
-                    text="I'm listening...",
-                    rgb=(0, 255, 0),
-                )
 
         elif event_type == "agent_thinking":
             self._touch_activity()
-            self._update_display(
-                status="thinking",
-                emoji="🤔",
-                text="Let me think...",
-                rgb=(255, 165, 0),
-            )
+            if not self._holding:
+                self._update_display(
+                    status="thinking",
+                    emoji="🤔",
+                    text="Let me think...",
+                    rgb=(255, 165, 0),
+                )
 
         elif event_type == "agent_speaking":
             self._touch_activity()
-            if display_state.status != "talking":
+            if not self._holding:
                 self._update_display(
                     status="talking",
                     rgb=(0, 100, 200),
@@ -477,7 +484,7 @@ class VoiceAgentStateMachine:
 
         elif event_type == "agent_audio_done":
             self._touch_activity()
-            if self.state not in ("game", "music"):
+            if self.state not in ("game", "music") and not self._holding:
                 self._update_display(
                     status="ready",
                     rgb=(0, 0, 85),
@@ -506,15 +513,21 @@ class VoiceAgentStateMachine:
 
         elif event_type == "disconnected":
             reason = data.get("reason", "")
-            if self.running and self.state == "active" and reason:
+            if self.state == "active" and reason:
                 print(f"[State] Unexpected disconnect: {reason}, reconnecting...")
                 self._update_display(
                     alert_text="Connection dropped -- retrying",
                     alert_level="warn",
                     alert_duration=3.0,
                 )
-                time.sleep(2)
-                self.start_agent()
+
+                def _reconnect():
+                    time.sleep(2)
+                    with self._lock:
+                        if self.running and self.state == "active":
+                            self.start_agent()
+
+                threading.Thread(target=_reconnect, daemon=True).start()
 
     # --- Display helper ---
 

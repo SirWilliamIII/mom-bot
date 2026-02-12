@@ -5,7 +5,6 @@ Binary frames = raw PCM audio. JSON text frames = control messages.
 """
 
 import json
-import struct
 import threading
 import time
 from config import Config
@@ -42,13 +41,12 @@ class VoiceAgent:
         self._state_machine = None  # set by state machine for tool calls
         self._audio_bytes_received = 0
         self._audio_bytes_written = 0
-        self._mic_muted = False  # True while agent is speaking (echo suppression)
-        self._unmute_at = 0      # timestamp when mic should actually unmute
         self._silence_seq = 0    # increments each silence_agent call; stale injects bail out
-        self._agent_spoke = False # True after agent speaks; reset when user speaks
-        self._dropping_turn = False  # True = actively suppressing a double-response
-        self._force_listen = False   # True = button held, speaker muted, mic live
-        self._paused = False         # True = pause mode, mic sends silence
+        self._input_enabled = False  # True = button held, send real mic audio; False = send silence
+        self._paused = False         # True = pause mode, mic sends silence AND agent audio discarded
+        self._output_suppress_until = 0  # monotonic timestamp; buffer agent audio until this time
+        self._output_buffer = []         # holds audio chunks during output suppression
+        self._lock = threading.Lock()    # protects _speaker_proc access
 
     @property
     def is_running(self):
@@ -111,9 +109,10 @@ class VoiceAgent:
         self._sender_thread.start()
 
         # Start speaker (output rate for TTS)
-        self._speaker_proc = start_playback_stream(
-            sample_rate=Config.DEEPGRAM_TTS_SAMPLE_RATE
-        )
+        with self._lock:
+            self._speaker_proc = start_playback_stream(
+                sample_rate=Config.DEEPGRAM_TTS_SAMPLE_RATE
+            )
 
         print("[VoiceAgent] Connected and streaming!")
         self._on_event("connected", {})
@@ -142,16 +141,17 @@ class VoiceAgent:
         self._mic_proc = None
 
         # Kill speaker
-        if self._speaker_proc:
-            for pipe in (self._speaker_proc.stdin, self._speaker_proc.stdout, self._speaker_proc.stderr):
-                if pipe:
-                    try:
-                        pipe.close()
-                    except Exception:
-                        pass
-            if self._speaker_proc.poll() is None:
-                self._speaker_proc.terminate()
-        self._speaker_proc = None
+        with self._lock:
+            if self._speaker_proc:
+                for pipe in (self._speaker_proc.stdin, self._speaker_proc.stdout, self._speaker_proc.stderr):
+                    if pipe:
+                        try:
+                            pipe.close()
+                        except Exception:
+                            pass
+                if self._speaker_proc.poll() is None:
+                    self._speaker_proc.terminate()
+            self._speaker_proc = None
         stop_playback()
 
         # Close WebSocket
@@ -186,21 +186,25 @@ class VoiceAgent:
         my_seq = self._silence_seq
         print(f"[VoiceAgent] Silencing agent (seq={my_seq})...")
 
-        # 1. Kill the speaker process — instant silence
-        if self._speaker_proc and self._speaker_proc.poll() is None:
-            try:
-                self._speaker_proc.stdin.close()
-            except Exception:
-                pass
-            self._speaker_proc.terminate()
-        self._speaker_proc = None
+        with self._lock:
+            # 1. Kill the speaker process — instant silence
+            if self._speaker_proc and self._speaker_proc.poll() is None:
+                try:
+                    self._speaker_proc.stdin.close()
+                except Exception:
+                    pass
+                self._speaker_proc.terminate()
+            self._speaker_proc = None
 
-        # 2. Restart a fresh speaker pipe so future audio still plays
-        self._speaker_proc = start_playback_stream(
-            sample_rate=Config.DEEPGRAM_TTS_SAMPLE_RATE
-        )
+            # 2. Restart a fresh speaker pipe so future audio still plays
+            self._speaker_proc = start_playback_stream(
+                sample_rate=Config.DEEPGRAM_TTS_SAMPLE_RATE
+            )
 
-        # 3. After a delay, inject — but only if no newer press happened
+        # 3. Clear any buffered output
+        self._output_buffer.clear()
+
+        # 4. After a delay, inject — but only if no newer press happened
         if then_inject:
             def _delayed_inject():
                 time.sleep(2.0)
@@ -219,29 +223,28 @@ class VoiceAgent:
             except Exception as e:
                 print(f"[VoiceAgent] Prompt update failed: {e}")
 
-    def force_listen(self, active):
-        """When active=True: mute speaker output, unmute mic (user is talking).
-        When active=False: restore normal operation."""
-        self._force_listen = active
-        if active:
-            self._mic_muted = False
-            self._unmute_at = 0
-            self._dropping_turn = True
-            self._paused = False  # unpause mic if force-listening
-            print("[VoiceAgent] Force-listen ON (speaker muted, mic live)")
+    def set_input_enabled(self, enabled):
+        """When enabled=True: send real mic audio (button held).
+        When enabled=False: send silence (button released)."""
+        self._input_enabled = enabled
+        if enabled:
+            self._paused = False  # unpause if force-listening
+            print("[VoiceAgent] Input enabled (mic live)")
         else:
-            self._dropping_turn = False
-            print("[VoiceAgent] Force-listen OFF")
+            print("[VoiceAgent] Input disabled (sending silence)")
 
     def set_paused(self, paused):
         """Mute/unmute the mic entirely (pause mode). Agent stays connected."""
         self._paused = paused
         if paused:
-            self._mic_muted = True
-            self._unmute_at = 0
             print("[VoiceAgent] Mic paused (sending silence)")
         else:
             print("[VoiceAgent] Mic unpaused")
+
+    def suppress_output_for(self, seconds):
+        """Buffer incoming agent audio for `seconds` before playing."""
+        self._output_suppress_until = time.time() + seconds
+        self._output_buffer.clear()
 
     def send_keep_alive(self):
         """Send keepalive to prevent timeout."""
@@ -255,60 +258,23 @@ class VoiceAgent:
 
     # Silence frame: same size as a mic chunk but all zeros
     _SILENCE = b"\x00" * MIC_CHUNK_BYTES
-    _ECHO_GATE_RMS = 1500
-    _ECHO_GATE_DURATION = 4.0
-
-    @staticmethod
-    def _rms(pcm_bytes):
-        """Compute RMS of 16-bit LE PCM audio."""
-        n = len(pcm_bytes) // 2
-        if n == 0:
-            return 0
-        samples = struct.unpack(f"<{n}h", pcm_bytes[:n * 2])
-        return int((sum(s * s for s in samples) / n) ** 0.5)
 
     def _send_loop(self):
-        """Read mic audio and send as binary WebSocket frames.
-
-        Push-to-talk: mic only sends real audio when _force_listen is True
-        (button held). All other times, silence is sent to prevent echo loops.
-
-        Additional echo suppression when mic is live:
-        1. Hard mute while agent is speaking (_mic_muted)
-        2. After unmute, energy gate for _ECHO_GATE_DURATION seconds:
-           only send audio if RMS > _ECHO_GATE_RMS (real speech),
-           otherwise send silence (suppress echo tail)
-        """
+        """Send mic audio. Only sends real audio when _input_enabled and not _paused."""
         print("[VoiceAgent] Mic sender started")
-        gate_until = 0
         try:
             while self._running and self._mic_proc and self._mic_proc.poll() is None:
                 chunk = self._mic_proc.stdout.read(MIC_CHUNK_BYTES)
                 if not chunk:
                     break
-
-                # Check if it's time to unmute
-                if self._mic_muted and self._unmute_at and time.time() >= self._unmute_at:
-                    self._mic_muted = False
-                    self._unmute_at = 0
-                    gate_until = time.time() + self._ECHO_GATE_DURATION
-                    print("[VoiceAgent] Mic unmuted -> energy gate active")
-
-                send_chunk = chunk
-                # Push-to-talk: mic is only live when button is held (_force_listen)
-                # Otherwise send silence to prevent echo loops
-                if self._paused or self._mic_muted or not self._force_listen:
+                if self._input_enabled and not self._paused:
+                    send_chunk = chunk
+                else:
                     send_chunk = self._SILENCE
-                elif time.time() < gate_until:
-                    rms = self._rms(chunk)
-                    if rms < self._ECHO_GATE_RMS:
-                        send_chunk = self._SILENCE
-
                 if self._ws and self._running:
                     try:
                         self._ws.send(send_chunk)
-                    except Exception as e:
-                        print(f"[VoiceAgent] Send error: {e}")
+                    except Exception:
                         break
         except Exception as e:
             print(f"[VoiceAgent] Sender crashed: {e}")
@@ -348,9 +314,52 @@ class VoiceAgent:
             self._running = False
 
     def _handle_audio(self, data):
-        """Write audio bytes to the aplay stdin pipe."""
-        if self._dropping_turn or self._force_listen or self._paused:
-            return  # discard: user talking, suppressed turn, or paused
+        """Write agent audio to speaker. Buffers during output suppression."""
+        if self._paused or self._input_enabled:
+            return  # Don't play agent audio while user is talking or paused
+
+        now = time.time()
+        if now < self._output_suppress_until:
+            # Buffer audio during response delay (cap at ~2s of 16kHz 16-bit mono)
+            if sum(len(c) for c in self._output_buffer) < 64000:
+                self._output_buffer.append(data)
+            return
+
+        # Flush any buffered audio first
+        if self._output_buffer:
+            for buffered in self._output_buffer:
+                self._write_to_speaker(buffered)
+            self._output_buffer.clear()
+
+        self._write_to_speaker(data)
+
+    def _write_to_speaker(self, data):
+        """Write audio data to speaker process with lock protection and auto-restart."""
+        with self._lock:
+            if not self._speaker_proc or self._speaker_proc.poll() is not None:
+                if self._speaker_proc and self._speaker_proc.poll() is not None:
+                    stderr_out = ""
+                    if self._speaker_proc.stderr:
+                        try:
+                            stderr_out = self._speaker_proc.stderr.read().decode(errors="replace")
+                        except Exception:
+                            pass
+                    print(f"[VoiceAgent] Speaker died (rc={self._speaker_proc.returncode}): {stderr_out}")
+                else:
+                    print("[VoiceAgent] No speaker process! Restarting...")
+                self._speaker_proc = start_playback_stream(
+                    sample_rate=Config.DEEPGRAM_TTS_SAMPLE_RATE
+                )
+
+            try:
+                self._speaker_proc.stdin.write(data)
+                self._speaker_proc.stdin.flush()
+                self._audio_bytes_written += len(data)
+            except (BrokenPipeError, OSError) as e:
+                print(f"[VoiceAgent] Speaker pipe error: {e}, restarting...")
+                self._speaker_proc = start_playback_stream(
+                    sample_rate=Config.DEEPGRAM_TTS_SAMPLE_RATE
+                )
 
         self._audio_bytes_received += len(data)
 
@@ -360,35 +369,6 @@ class VoiceAgent:
         elif self._audio_bytes_received % 32000 < len(data):
             print(f"[VoiceAgent] Audio: {self._audio_bytes_received} bytes received, "
                   f"{self._audio_bytes_written} written")
-
-        if not self._speaker_proc:
-            print("[VoiceAgent] No speaker process! Restarting...")
-            self._speaker_proc = start_playback_stream(
-                sample_rate=Config.DEEPGRAM_TTS_SAMPLE_RATE
-            )
-
-        if self._speaker_proc.poll() is not None:
-            # Process died — check why
-            stderr_out = ""
-            if self._speaker_proc.stderr:
-                try:
-                    stderr_out = self._speaker_proc.stderr.read().decode(errors="replace")
-                except Exception:
-                    pass
-            print(f"[VoiceAgent] Speaker died (rc={self._speaker_proc.returncode}): {stderr_out}")
-            self._speaker_proc = start_playback_stream(
-                sample_rate=Config.DEEPGRAM_TTS_SAMPLE_RATE
-            )
-
-        try:
-            self._speaker_proc.stdin.write(data)
-            self._speaker_proc.stdin.flush()
-            self._audio_bytes_written += len(data)
-        except (BrokenPipeError, OSError) as e:
-            print(f"[VoiceAgent] Speaker pipe error: {e}, restarting...")
-            self._speaker_proc = start_playback_stream(
-                sample_rate=Config.DEEPGRAM_TTS_SAMPLE_RATE
-            )
 
     def _handle_message(self, data):
         """Dispatch a JSON event from the Voice Agent."""
@@ -409,9 +389,6 @@ class VoiceAgent:
             self._on_event("conversation_text", {"role": role, "content": content})
 
         elif msg_type == "UserStartedSpeaking":
-            self._agent_spoke = False  # user spoke, allow next agent response
-            self._dropping_turn = False
-            self._mic_muted = False  # user is talking, make sure mic is live
             self._on_event("user_speaking", {})
 
         elif msg_type == "AgentThinking":
@@ -419,40 +396,21 @@ class VoiceAgent:
             self._on_event("agent_thinking", {"content": content})
 
         elif msg_type == "AgentStartedSpeaking":
-            # If user is holding the button (force_listen), suppress agent speech
-            if self._force_listen:
-                self._dropping_turn = True
+            if self._input_enabled:
                 print("[VoiceAgent] Dropping agent speech (user is holding button)")
                 return
-
-            # Double-response guard: if agent already spoke and user hasn't
-            # said anything, suppress this turn entirely.
-            if self._agent_spoke:
-                self._dropping_turn = True
-                print("[VoiceAgent] Dropping double-response (no user input since last agent turn)")
+            if self._paused:
+                print("[VoiceAgent] Dropping agent speech (paused)")
                 return
-
-            self._dropping_turn = False
-            self._agent_spoke = True
-            self._mic_muted = True  # suppress echo while speaking
-            self._unmute_at = 0    # cancel any pending unmute
             latency = data.get("total_latency", 0)
             tts_lat = data.get("tts_latency", 0)
-            print(f"[VoiceAgent] Agent speaking (latency: {latency:.2f}s, tts: {tts_lat:.2f}s) [mic muted]")
+            print(f"[VoiceAgent] Agent speaking (latency: {latency:.2f}s, tts: {tts_lat:.2f}s)")
             self._on_event("agent_speaking", {
                 "total_latency": latency,
                 "tts_latency": tts_lat,
             })
 
         elif msg_type == "AgentAudioDone":
-            if self._dropping_turn:
-                self._dropping_turn = False
-                print("[VoiceAgent] Dropped turn audio done")
-                return
-            # Schedule unmute after a delay — aplay buffer still has audio
-            # queued after Deepgram says done. The send loop checks the clock.
-            self._unmute_at = time.time() + 2.0
-            print("[VoiceAgent] Agent audio done [mic unmutes in 2000ms]")
             self._on_event("agent_audio_done", {})
 
         elif msg_type == "FunctionCallRequest":
