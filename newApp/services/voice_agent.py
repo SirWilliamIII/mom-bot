@@ -8,8 +8,6 @@ import json
 import struct
 import threading
 import time
-from datetime import datetime
-
 from config import Config
 from core.companion import get_system_prompt
 from features.tools import VOICE_AGENT_FUNCTIONS, execute_tool
@@ -523,21 +521,11 @@ class VoiceAgent:
     # --- Settings builder ---
 
     def _build_settings(self):
-        """Build the Voice Agent settings message."""
-        now = datetime.now()
-        hour = now.hour
-        if hour < 12:
-            greeting_time = "Good morning"
-        elif hour < 17:
-            greeting_time = "Good afternoon"
-        elif hour < 21:
-            greeting_time = "Good evening"
-        else:
-            greeting_time = "Hey there, night owl"
+        """Build the Voice Agent settings message.
 
-        name = Config.COMPANION_NAME
-        greeting = f"{greeting_time}! It's me, {name}! What's on your mind?"
-
+        No greeting — user initiates by holding the button and speaking.
+        Agent only responds after user releases the button (+0.5s delay).
+        """
         return {
             "type": "Settings",
             "audio": {
@@ -573,6 +561,5 @@ class VoiceAgent:
                         "model": Config.DEEPGRAM_TTS_MODEL,
                     }
                 },
-                "greeting": greeting,
             },
         }

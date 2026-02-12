@@ -18,7 +18,7 @@ class VoiceAgentStateMachine:
     Conversation flow:
         idle    → user holds button and speaks → connect agent → active
         active  → user holds button while speaking (push-to-talk)
-                → bot waits at least 1s before responding after user releases
+                → agent waits 0.5s after button release before responding
                 → double-click OR hold ≥2s = pause (no user talking, agent stays connected)
                 → long press (≥5s) = end conversation → idle
                 → user says 'bye'/'goodbye' = end conversation → idle
@@ -32,7 +32,7 @@ class VoiceAgentStateMachine:
     PAUSE_HOLD_SEC = 2.0
     LONG_PRESS_SEC = 5.0
     DOUBLE_CLICK_SEC = 0.4
-    RESPONSE_DELAY_SEC = 1.0
+    RESPONSE_DELAY_SEC = 0.5
 
     _RGB_MIN_INTERVAL = 0.4
 
@@ -65,10 +65,10 @@ class VoiceAgentStateMachine:
         from services.voice_agent import VoiceAgent
 
         self._update_display(
-            status="waking up",
-            emoji="🐷",
-            text=f"{Config.COMPANION_NAME} is waking up...",
-            rgb=(255, 200, 200),
+            status="listening",
+            emoji="🎤",
+            text="I'm listening...",
+            rgb=(0, 255, 0),
             scroll_speed=0,
         )
 
@@ -78,6 +78,8 @@ class VoiceAgentStateMachine:
         def do_connect():
             self._agent.connect()
             if self._agent.is_running:
+                # User is holding button — suppress greeting, mic is live
+                self._agent.force_listen(True)
                 self._set_state("active")
             else:
                 self._update_display(
