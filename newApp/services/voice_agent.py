@@ -348,8 +348,14 @@ class VoiceAgent:
             })
 
         elif msg_type == "AgentAudioDone":
-            self._mic_muted = False  # re-enable mic
-            print("[VoiceAgent] Agent audio done [mic unmuted]")
+            # Delay unmute — the aplay buffer still has ~200-500ms of audio
+            # queued up after Deepgram says it's done sending. If we unmute
+            # immediately, the tail end of Piglet's voice gets picked up.
+            def _delayed_unmute():
+                time.sleep(0.6)
+                self._mic_muted = False
+                print("[VoiceAgent] Agent audio done [mic unmuted after 600ms]")
+            threading.Thread(target=_delayed_unmute, daemon=True).start()
             self._on_event("agent_audio_done", {})
 
         elif msg_type == "FunctionCallRequest":
