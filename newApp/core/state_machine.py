@@ -29,13 +29,13 @@ class VoiceAgentStateMachine:
                 → double-click = wake up → idle
         idle    → showing sleep screen, waiting for user
                 → hold button = connect agent + start talking → active
-                → 2 min idle = deep sleep → asleep
+                → 2 min idle → asleep
         active  → hold button = push-to-talk (mic live while held)
                 → release button = agent responds after 0.5s delay
-                → double-click = end conversation → idle
-                → hold ≥10s = deep sleep (screen off, process alive)
-                → user says 'bye'/'goodbye' = end conversation → idle
-                → 30s no activity = end conversation → idle
+                → double-click = end conversation → asleep
+                → hold ≥10s = deep sleep → asleep
+                → user says 'bye'/'goodbye' = end conversation → asleep
+                → 30s no activity = end conversation → asleep
         game    → local game running, agent paused
         music   → music playing, agent still active
 
@@ -77,7 +77,7 @@ class VoiceAgentStateMachine:
         set_volume(70)
         set_capture_volume(100)
 
-        self._set_state("idle")
+        self._set_state("asleep")
 
     # --- Timer helpers (epoch-safe) ---
 
@@ -157,7 +157,7 @@ class VoiceAgentStateMachine:
                 time.sleep(3)
             agent.disconnect()
         with self._lock:
-            self._set_state("idle")
+            self._set_state("asleep")
 
     def stop(self):
         with self._lock:
@@ -229,7 +229,7 @@ class VoiceAgentStateMachine:
 
     def _enter_idle(self, **kwargs):
         name = Config.COMPANION_NAME
-        text = kwargs.get("text", f"Double-tap to talk to {name}!")
+        text = kwargs.get("text", f"Hold button to talk to {name}!")
         self._update_display(
             status="sleeping",
             emoji="🐷",
@@ -377,23 +377,16 @@ class VoiceAgentStateMachine:
 
     def _on_button_press_idle(self):
         with self._lock:
-            now = time.time()
-            if now - self._last_click_time < self.DOUBLE_CLICK_SEC:
-                # Double-click in idle → start conversation
-                print("[Button] Double-click (idle) -> starting conversation")
-                self._last_click_time = 0
-                self._button_press_time = now
-                self._holding = True
-                self.start_agent()
-            else:
-                self._last_click_time = now
-                self._button_press_time = now
+            print("[Button] PRESSED (idle) -> starting conversation")
+            self._button_press_time = time.time()
+            self._holding = True
+            self.start_agent()
 
     def _on_button_release_idle(self):
         with self._lock:
+            hold_time = time.time() - self._button_press_time
+            print(f"[Button] RELEASED (idle) hold={hold_time:.2f}s")
             self._holding = False
-            # If agent is connecting/connected (started by double-click),
-            # release means stop talking → agent responds
             if self._agent:
                 self._agent.set_input_enabled(False)
                 self._agent.suppress_output_for(self.RESPONSE_DELAY_SEC)
