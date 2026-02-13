@@ -131,7 +131,7 @@ class VoiceAgentStateMachine:
                         text="Couldn't connect. Check WiFi?",
                         turn="red",
                     )
-                    self._set_state("idle")
+                    self._set_state("asleep")
                     return
                 # Check actual button state at connect time
                 if self._holding:
