@@ -72,6 +72,11 @@ def _kill_previous_instance():
                 pid = line.strip()
                 if pid and int(pid) != my_pid:
                     print(f"[Cleanup] Killing previous instance (PID {pid})")
+                    # SIGTERM first — lets the process run cleanup/gpio_free
+                    subprocess.run(["kill", "-15", pid],
+                                   capture_output=True, timeout=2)
+                    time.sleep(1)
+                    # SIGKILL as backup
                     subprocess.run(["kill", "-9", pid],
                                    capture_output=True, timeout=2)
                     killed_any = True
