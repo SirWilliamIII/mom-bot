@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.env/
+.venv/
+dist/
+build/
+*.egg-info/
+*.egg
+.env
+1.69LCD.zip
+PROJECT.md
+WhisPlay.step
+Whisplay-pinout.csv

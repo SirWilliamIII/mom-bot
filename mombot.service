@@ -1,0 +1,32 @@
+[Unit]
+Description=MomBot (Piglet) Voice Companion
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=will
+Group=will
+WorkingDirectory=/home/will/mom-bot
+ExecStart=/home/will/mom-bot/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=5
+
+# Give the process time to say goodbye + disconnect cleanly
+TimeoutStopSec=10
+
+# GPIO + SPI + audio access
+SupplementaryGroups=spi gpio audio video i2c
+
+# Environment for ALSA and locale
+Environment=HOME=/home/will
+Environment=PYTHONUNBUFFERED=1
+Environment=TERM=xterm
+
+# Logging to journalctl
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mombot
+
+[Install]
+WantedBy=multi-user.target
