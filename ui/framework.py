@@ -1,9 +1,10 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 import math
+import random
 import time
 
-from PIL import ImageDraw
+from PIL import Image, ImageDraw
 
 
 def _clamp(v: int) -> int:
@@ -216,3 +217,180 @@ def infer_turn(status: str) -> str:
     if status in ("paused",):
         return "paused"
     return "sleep"
+
+
+# --- Smooth transitions ---
+
+def _lerp_color(a: tuple, b: tuple, t: float) -> tuple:
+    """Linearly interpolate between two RGBA color tuples."""
+    t = max(0.0, min(1.0, t))
+    return tuple(_clamp(int(a[i] + (b[i] - a[i]) * t)) for i in range(min(len(a), len(b))))
+
+
+def _ease_out_cubic(t: float) -> float:
+    """Ease-out cubic for smooth deceleration."""
+    return 1.0 - (1.0 - t) ** 3
+
+
+class TransitionManager:
+    """Manages smooth color transitions between UI states.
+
+    Tracks the previous theme and current theme, interpolating
+    colors over a configurable duration with easing.
+    """
+
+    DURATION = 0.3  # seconds for full transition
+
+    def __init__(self):
+        self._prev_turn = None
+        self._curr_turn = None
+        self._transition_start = 0.0
+        self._prev_theme = None
+        self._curr_theme = None
+
+    def update(self, turn: str) -> UITheme:
+        """Call each frame with the current turn. Returns the interpolated theme."""
+        if turn != self._curr_turn:
+            # New transition
+            self._prev_turn = self._curr_turn
+            self._prev_theme = self._curr_theme
+            self._curr_turn = turn
+            self._curr_theme = ThemeRegistry.turn_theme(turn)
+            self._transition_start = time.time()
+
+        if self._curr_theme is None:
+            self._curr_theme = ThemeRegistry.turn_theme(turn)
+            return self._curr_theme
+
+        if self._prev_theme is None:
+            return self._curr_theme
+
+        elapsed = time.time() - self._transition_start
+        if elapsed >= self.DURATION:
+            return self._curr_theme
+
+        t = _ease_out_cubic(elapsed / self.DURATION)
+        return UITheme(
+            name=f"transition:{self._prev_turn}->{self._curr_turn}",
+            background=_lerp_color(self._prev_theme.background, self._curr_theme.background, t),
+            panel=_lerp_color(self._prev_theme.panel, self._curr_theme.panel, t),
+            panel_alt=_lerp_color(self._prev_theme.panel_alt, self._curr_theme.panel_alt, t),
+            border=_lerp_color(self._prev_theme.border, self._curr_theme.border, t),
+            text_soft=_lerp_color(self._prev_theme.text_soft, self._curr_theme.text_soft, t),
+            alert_info=_lerp_color(self._prev_theme.alert_info, self._curr_theme.alert_info, t),
+            alert_warn=_lerp_color(self._prev_theme.alert_warn, self._curr_theme.alert_warn, t),
+            alert_error=_lerp_color(self._prev_theme.alert_error, self._curr_theme.alert_error, t),
+        )
+
+    @property
+    def is_transitioning(self) -> bool:
+        return (time.time() - self._transition_start) < self.DURATION
+
+
+# --- Particle system ---
+
+@dataclass
+class Particle:
+    x: float
+    y: float
+    vx: float
+    vy: float
+    life: float       # remaining life in seconds
+    max_life: float
+    kind: str          # "heart", "sparkle", "note"
+    size: int = 4
+
+
+class ParticleSystem:
+    """Lightweight particle effects for the LCD display.
+
+    Spawns small hearts, sparkles, or music notes that float
+    upward and fade out. Designed to be cheap on the Pi Zero.
+    Max ~12 particles at a time to keep render cost negligible.
+    """
+
+    MAX_PARTICLES = 12
+
+    def __init__(self):
+        self._particles: list[Particle] = []
+        self._last_update = time.time()
+        self._last_spawn = 0.0
+
+    def emit(self, kind: str, x: int, y: int, count: int = 3):
+        """Spawn particles at (x, y). kind: 'heart', 'sparkle', 'note'."""
+        for _ in range(min(count, self.MAX_PARTICLES - len(self._particles))):
+            life = random.uniform(0.8, 1.6)
+            self._particles.append(Particle(
+                x=x + random.uniform(-8, 8),
+                y=y + random.uniform(-4, 4),
+                vx=random.uniform(-12, 12),
+                vy=random.uniform(-30, -15),
+                life=life,
+                max_life=life,
+                kind=kind,
+                size=random.randint(3, 5),
+            ))
+
+    def update_and_draw(self, image: Image.Image, dt: float = None):
+        """Advance physics and draw surviving particles onto image."""
+        now = time.time()
+        if dt is None:
+            dt = now - self._last_update
+        self._last_update = now
+        dt = min(dt, 0.1)  # cap to avoid jumps
+
+        surviving = []
+        d = ImageDraw.Draw(image)
+
+        for p in self._particles:
+            p.life -= dt
+            if p.life <= 0:
+                continue
+            p.x += p.vx * dt
+            p.y += p.vy * dt
+            p.vy += 8 * dt  # slight gravity (slows upward drift)
+
+            alpha = int(255 * (p.life / p.max_life))
+            ix, iy = int(p.x), int(p.y)
+
+            if p.kind == "heart":
+                _draw_tiny_heart(d, ix, iy, p.size, alpha)
+            elif p.kind == "sparkle":
+                _draw_tiny_sparkle(d, ix, iy, p.size, alpha)
+            elif p.kind == "note":
+                _draw_tiny_note(d, ix, iy, p.size, alpha)
+
+            surviving.append(p)
+
+        self._particles = surviving
+
+    @property
+    def active(self) -> bool:
+        return len(self._particles) > 0
+
+    def clear(self):
+        self._particles.clear()
+
+
+def _draw_tiny_heart(d, x, y, size, alpha):
+    """Draw a tiny heart shape."""
+    c = (255, 120, 150, max(60, alpha))
+    hs = size // 2
+    # Two small circles + triangle to approximate heart
+    d.ellipse((x - hs, y - hs, x, y), fill=c)
+    d.ellipse((x, y - hs, x + hs, y), fill=c)
+    d.polygon([(x - hs, y - 1), (x + hs, y - 1), (x, y + hs)], fill=c)
+
+
+def _draw_tiny_sparkle(d, x, y, size, alpha):
+    """Draw a tiny 4-point sparkle."""
+    c = (255, 255, 200, max(60, alpha))
+    d.line((x - size, y, x + size, y), fill=c, width=1)
+    d.line((x, y - size, x, y + size), fill=c, width=1)
+
+
+def _draw_tiny_note(d, x, y, size, alpha):
+    """Draw a tiny music note."""
+    c = (255, 200, 220, max(60, alpha))
+    d.ellipse((x, y, x + size, y + size - 1), fill=c)
+    d.line((x + size, y - size, x + size, y + 1), fill=c, width=1)

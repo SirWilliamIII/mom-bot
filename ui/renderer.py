@@ -7,13 +7,16 @@ from PIL import Image, ImageDraw, ImageFont
 from ui.framework import (
     Components,
     Layout,
+    ParticleSystem,
     PigletCharacter,
     ThemeRegistry,
+    TransitionManager,
     alert_color_for_level,
     hint_for_status,
     infer_turn,
     pulse,
 )
+from ui.pig_sprites import PigSpriteSheet, sprite_mood_for_status
 from ui.utils import ColorUtils, ImageUtils, TextUtils
 
 
@@ -114,6 +117,13 @@ class RenderThread(threading.Thread):
         self._text_cache_img = None
         self._cached_text = None  # (text, theme_name) tuple for cache invalidation
 
+        # --- New: pig sprites, transitions, particles ---
+        self._pig = PigSpriteSheet()
+        self._transition = TransitionManager()
+        self._particles = ParticleSystem()
+        self._prev_status = None       # track status changes for particle bursts
+        self._last_frame_time = time.time()
+
     def _render_logo(self):
         logo_path = os.path.join("assets", "images", "logo.png")
         if os.path.exists(logo_path):
@@ -140,24 +150,28 @@ class RenderThread(threading.Thread):
     def stop(self):
         self.running = False
 
-    def _hourglass_frame(self) -> str:
-        frames = ["⌛", "⏳"]
-        idx = int(time.time() * 2.8) % len(frames)
-        return frames[idx]
-
     def _thinking_dots(self) -> str:
         n = int(time.time() * 2.5) % 4
         return "THINKING" + "." * n
 
     def _render_frame(self):
+        now = time.time()
+        dt = now - self._last_frame_time
+        self._last_frame_time = now
+
         state = display_state.snapshot()
         W = self.board.LCD_WIDTH
         H = self.board.LCD_HEIGHT
 
         # Determine turn: explicit if set, else infer from status
         turn = state.turn or infer_turn(state.status)
-        theme = ThemeRegistry.turn_theme(turn)
+
+        # Smooth theme transition instead of instant swap
+        theme = self._transition.update(turn)
         mood = PigletCharacter.mood_for_status(state.status)
+
+        # Detect status change -> emit particles
+        self._maybe_emit_particles(state, W)
 
         if state.game_surface is not None:
             data = ImageUtils.image_to_rgb565(state.game_surface, W, H)
@@ -173,7 +187,12 @@ class RenderThread(threading.Thread):
 
         header = Image.new("RGBA", (W, header_h), theme.background)
         hd = ImageDraw.Draw(header)
-        self._render_header(header, hd, state, W, theme, mood)
+        self._render_header(header, hd, state, W, theme, mood, now)
+
+        # Draw particles on the header (they float upward from the pig)
+        if self._particles.active:
+            self._particles.update_and_draw(header, dt)
+
         self.board.draw_image(
             0, 0, W, header_h,
             ImageUtils.image_to_rgb565(header, W, header_h),
@@ -217,7 +236,30 @@ class RenderThread(threading.Thread):
         if state.alert_text and time.time() < state.alert_until:
             self._render_alert(state, W, H, theme)
 
-    def _render_header(self, image, draw, state, width, theme, mood):
+    def _maybe_emit_particles(self, state, width):
+        """Emit particles on meaningful status changes."""
+        status_lower = (state.status or "").lower()
+        if status_lower != self._prev_status:
+            old = self._prev_status
+            self._prev_status = status_lower
+
+            pig_cx = width // 2
+            pig_cy = 45  # approximate pig center in header
+
+            if status_lower in ("talking", "answering"):
+                # Hearts when piglet starts speaking
+                self._particles.emit("heart", pig_cx, pig_cy, count=4)
+            elif status_lower in ("listening",):
+                # Sparkles when user starts talking
+                self._particles.emit("sparkle", pig_cx, pig_cy, count=3)
+            elif status_lower in ("playing music",):
+                # Notes for music
+                self._particles.emit("note", pig_cx, pig_cy, count=4)
+            elif status_lower in ("playing",):
+                # Sparkles for game
+                self._particles.emit("sparkle", pig_cx, pig_cy, count=3)
+
+    def _render_header(self, image, draw, state, width, theme, mood, now):
         Components.draw_panel(
             draw,
             2,
@@ -248,19 +290,33 @@ class RenderThread(threading.Thread):
 
         self._render_status_glow(draw, image, width, mood)
 
-        emoji_text = self._hourglass_frame() if is_thinking else (
-            state.emoji if state.emoji and state.emoji != "🐷" else mood.emoji
-        )
-        emoji_bbox = self.emoji_font.getbbox(emoji_text)
-        emoji_w = emoji_bbox[2] - emoji_bbox[0]
-        emoji_x = (width - emoji_w) // 2
-        emoji_y = self._emoji_y_for_anim(mood.anim_style)
-        TextUtils.draw_mixed_text(
-            draw, image, emoji_text, self.emoji_font,
-            (emoji_x, emoji_y),
-        )
+        # --- Pig sprite instead of emoji ---
+        sprite_mood = sprite_mood_for_status(state.status)
+        pig_frame = self._pig.get_frame(sprite_mood, now)
+        pig_w, pig_h = pig_frame.size
+
+        # Center horizontally, animate vertically with breathing/bobbing
+        pig_x = (width - pig_w) // 2
+        pig_y_base = (image.height - pig_h) // 2 + 2  # slight offset down
+        pig_y_anim = self._pig_y_for_anim(mood.anim_style)
+        pig_y = pig_y_base + pig_y_anim
+
+        image.paste(pig_frame, (pig_x, pig_y), pig_frame)
 
         self._render_battery(draw, state, width)
+
+    def _pig_y_for_anim(self, anim_style: str) -> int:
+        """Vertical animation offset for the pig sprite."""
+        if anim_style == "listen_pulse":
+            return int(pulse(-1, 2, speed=3.2))
+        if anim_style == "talk_bob":
+            return int(pulse(-2, 3, speed=4.0))
+        if anim_style == "celebrate":
+            return int(pulse(-3, 4, speed=4.8))
+        if anim_style == "think_blink":
+            return int(pulse(-1, 1, speed=1.8))
+        # idle_breathe: gentle
+        return int(pulse(-1, 1, speed=1.0))
 
     def _render_status_glow(self, draw, image, width, mood):
         amt = pulse(0.2, 1.0, speed=1.8)
@@ -268,17 +324,6 @@ class RenderThread(threading.Thread):
         color = (min(255, int(120 + r * amt)), min(255, int(90 + g * amt)), min(255, int(120 + b * amt)), 255)
         y = image.height - 8
         draw.rounded_rectangle([16, y, width - 16, y + 4], radius=2, fill=color)
-
-    def _emoji_y_for_anim(self, anim_style: str) -> int:
-        if anim_style == "listen_pulse":
-            return int(30 + pulse(-2, 3, speed=3.2))
-        if anim_style == "talk_bob":
-            return int(32 + pulse(-2, 4, speed=4.0))
-        if anim_style == "celebrate":
-            return int(31 + pulse(-3, 5, speed=4.8))
-        if anim_style == "think_blink":
-            return int(33 + pulse(-1, 2, speed=1.8))
-        return int(32 + pulse(-1, 1, speed=1.0))
 
     def _render_alert(self, state, W, H, theme):
         alert_h = 34

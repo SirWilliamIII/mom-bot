@@ -171,8 +171,7 @@ class VoiceAgentStateMachine:
         if self.board:
             try:
                 self.board.set_rgb(0, 0, 0)
-                self.board.fill_screen(0x0000)
-                self.board.set_backlight(0)
+                self.board.screen_off()
             except Exception:
                 pass
 
@@ -303,14 +302,14 @@ class VoiceAgentStateMachine:
         Button polling continues — double-click wakes back to idle.
         """
         self._holding = False
-        # Stop rendering
+        # Stop rendering first so no frame draws over our black screen
         if self.render_thread:
             self.render_thread.running = False
-        # Go dark
+            time.sleep(0.05)  # let current frame finish
+        # Go fully dark — LCD sleep mode + backlight off
         if self.board:
             self.board.set_rgb(0, 0, 0)
-            self.board.fill_screen(0x0000)
-            self.board.set_backlight(0)
+            self.board.screen_off()
         print("[State] Deep sleep — double-click to wake")
         # Register wake-up button handler (double-click only)
         self._last_click_time = 0
@@ -331,7 +330,7 @@ class VoiceAgentStateMachine:
     def _wake_up(self):
         """Restart the render thread and go to idle."""
         if self.board:
-            self.board.set_backlight(100)
+            self.board.screen_on()
         # Spin up a fresh render thread (old one exited its loop)
         if self.render_thread:
             new_render = RenderThread(

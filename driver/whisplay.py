@@ -58,6 +58,13 @@ class WhisplayBoard:
             )
 
         chip = _detect_gpio_chip()
+
+        # Force-free any stale GPIO claims from a previous crash.
+        # lgpio holds pins at the kernel level — if the old process died
+        # without cleanup, the pins stay "busy" until explicitly freed.
+        all_pins = [dc_bcm, rst_bcm, led_bcm, red_bcm, green_bcm, blue_bcm, btn_bcm]
+        self._force_free_gpio(chip, all_pins)
+
         Device.pin_factory = LGPIOFactory(chip=chip)
         print(f"[GPIO] Using gpiochip{chip}")
 
@@ -78,9 +85,8 @@ class WhisplayBoard:
         self._btn_pin = btn_bcm
         self._btn_chip = chip
         self._btn_handle = lgpio.gpiochip_open(chip)
-        lgpio.gpio_claim_input(self._btn_handle, btn_bcm, lgpio.SET_PULL_DOWN)
+        lgpio.gpio_claim_input(self._btn_handle, btn_bcm)
         self._btn_last_state = lgpio.gpio_read(self._btn_handle, btn_bcm)
-        print(f"[Button] Initial state: {self._btn_last_state}")
         self._btn_running = True
         self._btn_thread = threading.Thread(target=self._button_poll_loop, daemon=True)
         self._btn_thread.start()
@@ -125,6 +131,24 @@ class WhisplayBoard:
                 self.backlight.value = 1
             else:
                 self.backlight.value = 0
+
+    def screen_off(self):
+        """Fully kill the display — no glow, no leakage.
+
+        Sends the LCD sleep + display-off commands, fills black,
+        and forces the backlight PWM pin fully high (inverted = off).
+        """
+        self.fill_screen(0x0000)
+        self._send_command(0x28)  # DISPOFF
+        self._send_command(0x10)  # SLPIN (low-power mode)
+        self.set_backlight(0)
+
+    def screen_on(self):
+        """Wake the display from screen_off."""
+        self._send_command(0x11)  # SLPOUT
+        time.sleep(0.12)         # ST7789 needs 120ms after SLPOUT
+        self._send_command(0x29)  # DISPON
+        self.set_backlight(100)
 
     def _reset_lcd(self):
         self.rst.on()
@@ -280,13 +304,44 @@ class WhisplayBoard:
     def on_button_release(self, callback):
         self.button_release_callback = callback
 
+    @staticmethod
+    def _force_free_gpio(chip, pins):
+        """Open the GPIO chip, free each pin, then close. Ignores errors.
+
+        This clears stale claims left by a crashed process so the new
+        process can claim them cleanly.
+        """
+        if not _LGPIO_AVAILABLE:
+            return
+        try:
+            h = lgpio.gpiochip_open(chip)
+        except Exception as e:
+            print(f"[GPIO] Can't open chip {chip} for cleanup: {e}")
+            return
+        for pin in pins:
+            try:
+                lgpio.gpio_free(h, pin)
+            except Exception:
+                pass  # pin wasn't claimed — that's fine
+        try:
+            lgpio.gpiochip_close(h)
+        except Exception:
+            pass
+        print(f"[GPIO] Force-freed {len(pins)} pins on gpiochip{chip}")
+
     def cleanup(self):
         self._btn_running = False
-        self.spi.close()
-        self.red_pwm.close()
-        self.green_pwm.close()
-        self.blue_pwm.close()
-        self.backlight.close()
-        self.dc.close()
-        self.rst.close()
-        lgpio.gpiochip_close(self._btn_handle)
+        try:
+            self.spi.close()
+        except Exception:
+            pass
+        for dev in (self.red_pwm, self.green_pwm, self.blue_pwm,
+                    self.backlight, self.dc, self.rst):
+            try:
+                dev.close()
+            except Exception:
+                pass
+        try:
+            lgpio.gpiochip_close(self._btn_handle)
+        except Exception:
+            pass
