@@ -83,6 +83,25 @@ def _kill_previous_instance():
         except Exception:
             pass
 
+    # Also kill anything holding /dev/gpiochip* directly
+    for chip in ("/dev/gpiochip4", "/dev/gpiochip0"):
+        if os.path.exists(chip):
+            try:
+                result = subprocess.run(
+                    ["sudo", "fuser", chip],
+                    capture_output=True, text=True, timeout=3,
+                )
+                pids = result.stdout.strip().split()
+                for pid in pids:
+                    pid = pid.strip()
+                    if pid and int(pid) != my_pid:
+                        print(f"[Cleanup] Killing process holding {chip} (PID {pid})")
+                        subprocess.run(["kill", "-9", pid],
+                                       capture_output=True, timeout=2)
+                        killed_any = True
+            except Exception:
+                pass
+
     if killed_any:
         # Kernel needs time to close fds and release GPIO claims
         time.sleep(2.0)
