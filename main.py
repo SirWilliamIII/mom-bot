@@ -45,9 +45,20 @@ def _kill_previous_instance():
     GPIO pins (via lgpio/gpiozero) are held at the kernel level per-process.
     If a previous run crashed or was killed without cleanup, the only way
     to free the pins is to kill that process.
+
+    Must also stop the systemd service first — otherwise Restart=on-failure
+    will immediately respawn the killed process, re-claiming GPIO.
     """
+    # Stop the systemd service if it's running (prevents respawn after kill)
+    try:
+        subprocess.run(["sudo", "systemctl", "stop", "mombot"],
+                       capture_output=True, timeout=5)
+        print("[Cleanup] Stopped mombot systemd service")
+    except Exception:
+        pass
+
     my_pid = os.getpid()
-    # Match both new app (main.py) and old app (chatbot-ui.py)
+    killed_any = False
     for pattern in ("python.*main\\.py", "python.*chatbot-ui\\.py"):
         try:
             result = subprocess.run(
@@ -60,9 +71,13 @@ def _kill_previous_instance():
                     print(f"[Cleanup] Killing previous instance (PID {pid})")
                     subprocess.run(["kill", "-9", pid],
                                    capture_output=True, timeout=2)
-                    time.sleep(1.5)  # kernel needs time to release GPIO
+                    killed_any = True
         except Exception:
             pass
+
+    if killed_any:
+        # Kernel needs time to close fds and release GPIO claims
+        time.sleep(2.0)
 
 
 def _sync_asoundrc():
@@ -98,6 +113,7 @@ def main():
     _sync_asoundrc()
 
     from driver.whisplay import WhisplayBoard
+    from gpiozero import Device
     board = None
     for attempt in range(3):
         try:
@@ -105,9 +121,16 @@ def main():
             print(f"[LCD] Initialized: {board.LCD_WIDTH}x{board.LCD_HEIGHT}")
             break
         except Exception as e:
+            # Close gpiozero's factory so the next attempt starts clean
+            if Device.pin_factory is not None:
+                try:
+                    Device.pin_factory.close()
+                except Exception:
+                    pass
+                Device.pin_factory = None
             if attempt < 2:
-                print(f"[Driver] GPIO busy (attempt {attempt+1}/3), retrying in 2s...")
-                time.sleep(2)
+                print(f"[Driver] GPIO busy (attempt {attempt+1}/3), retrying in 3s...")
+                time.sleep(3)
             else:
                 import traceback
                 print(f"[Driver] Failed to initialize Whisplay board: {e}")
