@@ -49,13 +49,16 @@ def _kill_previous_instance():
     Must also stop the systemd service first — otherwise Restart=on-failure
     will immediately respawn the killed process, re-claiming GPIO.
     """
-    # Stop the systemd service if it's running (prevents respawn after kill)
-    try:
-        subprocess.run(["sudo", "systemctl", "stop", "mombot"],
-                       capture_output=True, timeout=5)
-        print("[Cleanup] Stopped mombot systemd service")
-    except Exception:
-        pass
+    # Stop the systemd service if it's running (prevents respawn after kill).
+    # Skip if WE are the service (INVOCATION_ID is set by systemd) — otherwise
+    # we'd stop ourselves and exit before doing anything useful.
+    if not os.environ.get("INVOCATION_ID"):
+        try:
+            subprocess.run(["sudo", "systemctl", "stop", "mombot"],
+                           capture_output=True, timeout=5)
+            print("[Cleanup] Stopped mombot systemd service")
+        except Exception:
+            pass
 
     my_pid = os.getpid()
     killed_any = False
