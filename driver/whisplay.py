@@ -4,13 +4,6 @@ import threading
 import spidev
 
 try:
-    from gpiozero import PWMOutputDevice, OutputDevice, Device
-    from gpiozero.pins.lgpio import LGPIOFactory
-    _GPIO_AVAILABLE = True
-except ImportError:
-    _GPIO_AVAILABLE = False
-
-try:
     import lgpio
     _LGPIO_AVAILABLE = True
 except ImportError:
@@ -22,6 +15,7 @@ def _detect_gpio_chip():
         return 4
     return 0
 
+
 BOARD_TO_BCM = {
     3: 2, 5: 3, 7: 4, 8: 14, 10: 15, 11: 17, 12: 18,
     13: 27, 15: 22, 16: 23, 18: 24, 19: 10, 21: 9,
@@ -31,6 +25,13 @@ BOARD_TO_BCM = {
 
 
 class WhisplayBoard:
+    """Hardware driver for the Whisplay HAT (240x280 ST7789 LCD).
+
+    Uses lgpio directly for all GPIO — no gpiozero dependency.
+    This avoids the 'GPIO busy' issue caused by gpiozero's LGPIOFactory
+    opening a separate chip handle that can't free pins from other handles.
+    """
+
     LCD_WIDTH = 240
     LCD_HEIGHT = 280
     CornerHeight = 20
@@ -43,7 +44,16 @@ class WhisplayBoard:
     BLUE_PIN_BOARD = 16
     BUTTON_PIN_BOARD = 11
 
+    # PWM frequency for backlight and RGB LED
+    _BL_FREQ = 1000
+    _RGB_FREQ = 100
+
     def __init__(self):
+        if not _LGPIO_AVAILABLE:
+            raise RuntimeError(
+                "lgpio not available. Install with: pip install rpi-lgpio"
+            )
+
         dc_bcm = BOARD_TO_BCM[self.DC_PIN_BOARD]
         rst_bcm = BOARD_TO_BCM[self.RST_PIN_BOARD]
         led_bcm = BOARD_TO_BCM[self.LED_PIN_BOARD]
@@ -52,49 +62,54 @@ class WhisplayBoard:
         blue_bcm = BOARD_TO_BCM[self.BLUE_PIN_BOARD]
         btn_bcm = BOARD_TO_BCM[self.BUTTON_PIN_BOARD]
 
-        if not _GPIO_AVAILABLE:
-            raise RuntimeError(
-                "gpiozero not available. Install with: pip install gpiozero rpi-lgpio"
-            )
-
         chip = _detect_gpio_chip()
-
-        # Close any existing gpiozero factory to release its GPIO handle.
-        # This is critical when retrying — the previous failed attempt
-        # may have partially claimed pins on its handle.
-        if Device.pin_factory is not None:
-            try:
-                Device.pin_factory.close()
-            except Exception:
-                pass
-            Device.pin_factory = None
-
-        Device.pin_factory = LGPIOFactory(chip=chip)
+        self._chip = chip
+        self._handle = lgpio.gpiochip_open(chip)
         print(f"[GPIO] Using gpiochip{chip}")
 
-        self.dc = OutputDevice(dc_bcm)
-        self.rst = OutputDevice(rst_bcm)
+        # Store pin numbers for cleanup
+        self._dc_pin = dc_bcm
+        self._rst_pin = rst_bcm
+        self._bl_pin = led_bcm
+        self._red_pin = red_bcm
+        self._green_pin = green_bcm
+        self._blue_pin = blue_bcm
+        self._btn_pin = btn_bcm
 
-        self.backlight = PWMOutputDevice(led_bcm, frequency=1000, initial_value=0)
+        all_pins = [dc_bcm, rst_bcm, led_bcm, red_bcm, green_bcm, blue_bcm, btn_bcm]
 
-        self.red_pwm = PWMOutputDevice(red_bcm, frequency=100, initial_value=1)
-        self.green_pwm = PWMOutputDevice(green_bcm, frequency=100, initial_value=1)
-        self.blue_pwm = PWMOutputDevice(blue_bcm, frequency=100, initial_value=1)
+        # Force-free all pins on THIS handle first, so reclaim always works.
+        for pin in all_pins:
+            try:
+                lgpio.gpio_free(self._handle, pin)
+            except Exception:
+                pass
+
+        # DC and RST — simple output pins
+        lgpio.gpio_claim_output(self._handle, dc_bcm)
+        lgpio.gpio_claim_output(self._handle, rst_bcm)
+
+        # Backlight — PWM (inverted: 0% duty = full brightness)
+        lgpio.tx_pwm(self._handle, led_bcm, self._BL_FREQ, 100)  # off initially
+
+        # RGB LED — PWM (inverted: 100% duty = off)
+        lgpio.tx_pwm(self._handle, red_bcm, self._RGB_FREQ, 100)
+        lgpio.tx_pwm(self._handle, green_bcm, self._RGB_FREQ, 100)
+        lgpio.tx_pwm(self._handle, blue_bcm, self._RGB_FREQ, 100)
         self._current_r = 0
         self._current_g = 0
         self._current_b = 0
 
+        # Button — input
         self.button_press_callback = None
         self.button_release_callback = None
-        self._btn_pin = btn_bcm
-        self._btn_chip = chip
-        self._btn_handle = lgpio.gpiochip_open(chip)
-        lgpio.gpio_claim_input(self._btn_handle, btn_bcm)
-        self._btn_last_state = lgpio.gpio_read(self._btn_handle, btn_bcm)
+        lgpio.gpio_claim_input(self._handle, btn_bcm)
+        self._btn_last_state = lgpio.gpio_read(self._handle, btn_bcm)
         self._btn_running = True
         self._btn_thread = threading.Thread(target=self._button_poll_loop, daemon=True)
         self._btn_thread.start()
 
+        # SPI for LCD data
         self.spi = spidev.SpiDev()
         self.spi.open(0, 0)
         self.spi.max_speed_hz = 100_000_000
@@ -127,21 +142,15 @@ class WhisplayBoard:
             self.backlight_mode = True
 
     def set_backlight(self, brightness):
+        """Set backlight brightness 0-100. PWM is inverted (0 duty = full on)."""
         if self.backlight_mode:
             if 0 <= brightness <= 100:
-                self.backlight.value = (100 - brightness) / 100.0
+                lgpio.tx_pwm(self._handle, self._bl_pin, self._BL_FREQ, 100 - brightness)
         else:
-            if brightness == 0:
-                self.backlight.value = 1
-            else:
-                self.backlight.value = 0
+            lgpio.tx_pwm(self._handle, self._bl_pin, self._BL_FREQ, 0 if brightness > 0 else 100)
 
     def screen_off(self):
-        """Fully kill the display — no glow, no leakage.
-
-        Sends the LCD sleep + display-off commands, fills black,
-        and forces the backlight PWM pin fully high (inverted = off).
-        """
+        """Fully kill the display — no glow, no leakage."""
         self.fill_screen(0x0000)
         self._send_command(0x28)  # DISPOFF
         self._send_command(0x10)  # SLPIN (low-power mode)
@@ -155,11 +164,11 @@ class WhisplayBoard:
         self.set_backlight(100)
 
     def _reset_lcd(self):
-        self.rst.on()
+        lgpio.gpio_write(self._handle, self._rst_pin, 1)
         time.sleep(0.1)
-        self.rst.off()
+        lgpio.gpio_write(self._handle, self._rst_pin, 0)
         time.sleep(0.1)
-        self.rst.on()
+        lgpio.gpio_write(self._handle, self._rst_pin, 1)
         time.sleep(0.12)
 
     def _init_display(self):
@@ -189,14 +198,14 @@ class WhisplayBoard:
         self._send_command(0x29)
 
     def _send_command(self, cmd, *args):
-        self.dc.off()
+        lgpio.gpio_write(self._handle, self._dc_pin, 0)
         self.spi.xfer2([cmd])
         if args:
-            self.dc.on()
+            lgpio.gpio_write(self._handle, self._dc_pin, 1)
             self._send_data(list(args))
 
     def _send_data(self, data):
-        self.dc.on()
+        lgpio.gpio_write(self._handle, self._dc_pin, 1)
         try:
             self.spi.writebytes2(data)
         except AttributeError:
@@ -259,9 +268,9 @@ class WhisplayBoard:
         self._send_data(pixel_data)
 
     def set_rgb(self, r, g, b):
-        self.red_pwm.value = 1.0 - (r / 255.0)
-        self.green_pwm.value = 1.0 - (g / 255.0)
-        self.blue_pwm.value = 1.0 - (b / 255.0)
+        lgpio.tx_pwm(self._handle, self._red_pin, self._RGB_FREQ, 100 - (r / 255.0) * 100)
+        lgpio.tx_pwm(self._handle, self._green_pin, self._RGB_FREQ, 100 - (g / 255.0) * 100)
+        lgpio.tx_pwm(self._handle, self._blue_pin, self._RGB_FREQ, 100 - (b / 255.0) * 100)
         self._current_r = r
         self._current_g = g
         self._current_b = b
@@ -269,20 +278,19 @@ class WhisplayBoard:
     def set_rgb_fade(self, r_target, g_target, b_target, duration_ms=100):
         steps = 20
         delay = duration_ms / steps / 1000.0
-        r_step = (r_target - self._current_r) / steps
-        g_step = (g_target - self._current_g) / steps
-        b_step = (b_target - self._current_b) / steps
+        r_start, g_start, b_start = self._current_r, self._current_g, self._current_b
         for i in range(steps + 1):
+            t = i / steps
             self.set_rgb(
-                max(0, min(255, int(self._current_r + i * r_step))),
-                max(0, min(255, int(self._current_g + i * g_step))),
-                max(0, min(255, int(self._current_b + i * b_step))),
+                max(0, min(255, int(r_start + (r_target - r_start) * t))),
+                max(0, min(255, int(g_start + (g_target - g_start) * t))),
+                max(0, min(255, int(b_start + (b_target - b_start) * t))),
             )
             time.sleep(delay)
 
     def _button_poll_loop(self):
         while self._btn_running:
-            state = lgpio.gpio_read(self._btn_handle, self._btn_pin)
+            state = lgpio.gpio_read(self._handle, self._btn_pin)
             if state != self._btn_last_state:
                 self._btn_last_state = state
                 if state == 1:
@@ -300,7 +308,7 @@ class WhisplayBoard:
             time.sleep(0.02)
 
     def button_pressed(self):
-        return lgpio.gpio_read(self._btn_handle, self._btn_pin) == 1
+        return lgpio.gpio_read(self._handle, self._btn_pin) == 1
 
     def on_button_press(self, callback):
         self.button_press_callback = callback
@@ -308,44 +316,21 @@ class WhisplayBoard:
     def on_button_release(self, callback):
         self.button_release_callback = callback
 
-    @staticmethod
-    def _force_free_gpio(chip, pins):
-        """Open the GPIO chip, free each pin, then close. Ignores errors.
-
-        This clears stale claims left by a crashed process so the new
-        process can claim them cleanly.
-        """
-        if not _LGPIO_AVAILABLE:
-            return
-        try:
-            h = lgpio.gpiochip_open(chip)
-        except Exception as e:
-            print(f"[GPIO] Can't open chip {chip} for cleanup: {e}")
-            return
-        for pin in pins:
-            try:
-                lgpio.gpio_free(h, pin)
-            except Exception:
-                pass  # pin wasn't claimed — that's fine
-        try:
-            lgpio.gpiochip_close(h)
-        except Exception:
-            pass
-        print(f"[GPIO] Force-freed {len(pins)} pins on gpiochip{chip}")
-
     def cleanup(self):
         self._btn_running = False
         try:
             self.spi.close()
         except Exception:
             pass
-        for dev in (self.red_pwm, self.green_pwm, self.blue_pwm,
-                    self.backlight, self.dc, self.rst):
+        # Free all GPIO pins
+        for pin in (self._dc_pin, self._rst_pin, self._bl_pin,
+                    self._red_pin, self._green_pin, self._blue_pin,
+                    self._btn_pin):
             try:
-                dev.close()
+                lgpio.gpio_free(self._handle, pin)
             except Exception:
                 pass
         try:
-            lgpio.gpiochip_close(self._btn_handle)
+            lgpio.gpiochip_close(self._handle)
         except Exception:
             pass

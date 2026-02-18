@@ -113,7 +113,6 @@ def main():
     _sync_asoundrc()
 
     from driver.whisplay import WhisplayBoard
-    from gpiozero import Device
     board = None
     for attempt in range(3):
         try:
@@ -121,15 +120,8 @@ def main():
             print(f"[LCD] Initialized: {board.LCD_WIDTH}x{board.LCD_HEIGHT}")
             break
         except Exception as e:
-            # Close gpiozero's factory so the next attempt starts clean
-            if Device.pin_factory is not None:
-                try:
-                    Device.pin_factory.close()
-                except Exception:
-                    pass
-                Device.pin_factory = None
             if attempt < 2:
-                print(f"[Driver] GPIO busy (attempt {attempt+1}/3), retrying in 3s...")
+                print(f"[Driver] GPIO init failed (attempt {attempt+1}/3), retrying in 3s...")
                 time.sleep(3)
             else:
                 import traceback
