@@ -1,3 +1,4 @@
+import atexit
 import os
 import signal
 import subprocess
@@ -59,7 +60,7 @@ def _kill_previous_instance():
                     print(f"[Cleanup] Killing previous instance (PID {pid})")
                     subprocess.run(["kill", "-9", pid],
                                    capture_output=True, timeout=2)
-                    time.sleep(0.5)
+                    time.sleep(1.5)  # kernel needs time to release GPIO
         except Exception:
             pass
 
@@ -96,16 +97,23 @@ def main():
     # Sync ALSA config so audio changes propagate on git pull
     _sync_asoundrc()
 
-    try:
-        from driver.whisplay import WhisplayBoard
-        board = WhisplayBoard()
-        print(f"[LCD] Initialized: {board.LCD_WIDTH}x{board.LCD_HEIGHT}")
-    except Exception as e:
-        import traceback
-        print(f"[Driver] Failed to initialize Whisplay board: {e}")
-        traceback.print_exc()
-        print("[Driver] Running in headless mode (no display/GPIO)")
-        board = None
+    from driver.whisplay import WhisplayBoard
+    board = None
+    for attempt in range(3):
+        try:
+            board = WhisplayBoard()
+            print(f"[LCD] Initialized: {board.LCD_WIDTH}x{board.LCD_HEIGHT}")
+            break
+        except Exception as e:
+            if attempt < 2:
+                print(f"[Driver] GPIO busy (attempt {attempt+1}/3), retrying in 2s...")
+                time.sleep(2)
+            else:
+                import traceback
+                print(f"[Driver] Failed to initialize Whisplay board: {e}")
+                traceback.print_exc()
+                print("[Driver] Running in headless mode (no display/GPIO)")
+                board = None
 
     font_path = Config.CUSTOM_FONT_PATH or "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
@@ -117,8 +125,19 @@ def main():
 
     sm = create_state_machine(board, render_thread)
 
+    # --- Cleanup: runs on SIGTERM, SIGINT, and atexit ---
+    _cleanup_done = threading.Event()
+
     def cleanup(signum=None, frame=None):
-        print("\n[System] Shutting down...")
+        if _cleanup_done.is_set():
+            return
+        _cleanup_done.set()
+
+        sig_name = ""
+        if signum is not None:
+            sig_name = signal.Signals(signum).name if hasattr(signal, 'Signals') else str(signum)
+        print(f"\n[System] Shutting down... (signal={sig_name or 'exit'})")
+
         try:
             sm.stop()
         except Exception:
@@ -131,17 +150,18 @@ def main():
         try:
             if board:
                 board.set_rgb(0, 0, 0)
-                board.fill_screen(0x0000)
-                board.set_backlight(0)
+                board.screen_off()
                 board.cleanup()
         except Exception:
             pass
         _force_kill_audio()
-        # Force exit -- don't let daemon threads hang the process
-        os._exit(0)
+        print("[System] Cleanup complete")
 
-    signal.signal(signal.SIGTERM, cleanup)
-    signal.signal(signal.SIGINT, cleanup)
+    # atexit ensures cleanup runs even on normal exit or unhandled exception.
+    # Signal handlers cover SIGTERM (systemd stop) and SIGINT (Ctrl-C).
+    atexit.register(cleanup)
+    signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
+    signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
 
     # Voice Agent mode: user holds button while speaking (push-to-talk).
     # Legacy mode: button press/release handled entirely by the state machine.
@@ -149,8 +169,8 @@ def main():
     try:
         while True:
             time.sleep(1)
-    except KeyboardInterrupt:
-        cleanup()
+    except (KeyboardInterrupt, SystemExit):
+        sys.exit(0)
 
 
 if __name__ == "__main__":
