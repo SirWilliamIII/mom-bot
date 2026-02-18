@@ -65,6 +65,11 @@ class WhisplayBoard:
         chip = _detect_gpio_chip()
         self._chip = chip
         self._handle = lgpio.gpiochip_open(chip)
+        self._btn_running = False
+        self._btn_thread = None
+        self.spi = None
+        self.button_press_callback = None
+        self.button_release_callback = None
         print(f"[GPIO] Using gpiochip{chip}")
 
         # Store pin numbers for cleanup
@@ -85,29 +90,32 @@ class WhisplayBoard:
             except Exception:
                 pass
 
-        # DC and RST — simple output pins
-        lgpio.gpio_claim_output(self._handle, dc_bcm)
-        lgpio.gpio_claim_output(self._handle, rst_bcm)
+        # If any GPIO claim fails, clean up so retries get a fresh handle.
+        try:
+            # DC and RST — simple output pins
+            lgpio.gpio_claim_output(self._handle, dc_bcm)
+            lgpio.gpio_claim_output(self._handle, rst_bcm)
 
-        # Backlight — PWM (inverted: 0% duty = full brightness)
-        lgpio.tx_pwm(self._handle, led_bcm, self._BL_FREQ, 100)  # off initially
+            # Backlight — PWM (inverted: 0% duty = full brightness)
+            lgpio.tx_pwm(self._handle, led_bcm, self._BL_FREQ, 100)  # off initially
 
-        # RGB LED — PWM (inverted: 100% duty = off)
-        lgpio.tx_pwm(self._handle, red_bcm, self._RGB_FREQ, 100)
-        lgpio.tx_pwm(self._handle, green_bcm, self._RGB_FREQ, 100)
-        lgpio.tx_pwm(self._handle, blue_bcm, self._RGB_FREQ, 100)
-        self._current_r = 0
-        self._current_g = 0
-        self._current_b = 0
+            # RGB LED — PWM (inverted: 100% duty = off)
+            lgpio.tx_pwm(self._handle, red_bcm, self._RGB_FREQ, 100)
+            lgpio.tx_pwm(self._handle, green_bcm, self._RGB_FREQ, 100)
+            lgpio.tx_pwm(self._handle, blue_bcm, self._RGB_FREQ, 100)
+            self._current_r = 0
+            self._current_g = 0
+            self._current_b = 0
 
-        # Button — input
-        self.button_press_callback = None
-        self.button_release_callback = None
-        lgpio.gpio_claim_input(self._handle, btn_bcm)
-        self._btn_last_state = lgpio.gpio_read(self._handle, btn_bcm)
-        self._btn_running = True
-        self._btn_thread = threading.Thread(target=self._button_poll_loop, daemon=True)
-        self._btn_thread.start()
+            # Button — input
+            lgpio.gpio_claim_input(self._handle, btn_bcm)
+            self._btn_last_state = lgpio.gpio_read(self._handle, btn_bcm)
+            self._btn_running = True
+            self._btn_thread = threading.Thread(target=self._button_poll_loop, daemon=True)
+            self._btn_thread.start()
+        except Exception:
+            self.cleanup()
+            raise
 
         # SPI for LCD data
         self.spi = spidev.SpiDev()
@@ -318,10 +326,11 @@ class WhisplayBoard:
 
     def cleanup(self):
         self._btn_running = False
-        try:
-            self.spi.close()
-        except Exception:
-            pass
+        if self.spi:
+            try:
+                self.spi.close()
+            except Exception:
+                pass
         # Free all GPIO pins
         for pin in (self._dc_pin, self._rst_pin, self._bl_pin,
                     self._red_pin, self._green_pin, self._blue_pin,
