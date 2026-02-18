@@ -1,0 +1,11 @@
+gpiozero
+rpi-lgpio
+spidev
+Pillow
+numpy
+cairosvg
+openai>=1.0.0
+google-generativeai>=0.8.0
+python-dotenv
+websockets>=12.0
+duckduckgo_search>=6.0.0
