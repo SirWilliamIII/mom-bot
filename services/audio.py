@@ -12,6 +12,43 @@ _active_playback = []
 _playback_lock = threading.Lock()
 
 
+def init_mixer():
+    """Initialize all WM8960 mixer controls for playback and capture.
+
+    After a cold boot the codec's output-mixer routing switches are OFF,
+    which means the DAC never reaches the speaker amplifier — total silence
+    even with Speaker volume at max.  This sets the full signal path:
+        PCM -> DAC -> Output Mixer -> Speaker Amplifier -> Speaker
+    """
+    card = Config.SOUND_CARD_NAME
+    dev = f"hw:{card}"
+
+    controls = [
+        # Output routing: connect DAC to the output mixer (critical!)
+        ("Left Output Mixer PCM", "on"),
+        ("Right Output Mixer PCM", "on"),
+        # DAC digital volume (0-255, 255 = 0dB)
+        ("Playback", "255"),
+        # Speaker amplifier
+        ("Speaker", str(Config.INITIAL_VOLUME_LEVEL)),
+        # Capture input path
+        ("Capture", "63"),
+        ("Left Input Mixer Boost", "on"),
+        ("Right Input Mixer Boost", "on"),
+    ]
+
+    for name, value in controls:
+        try:
+            result = subprocess.run(
+                ["amixer", "-D", dev, "sset", name, value],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0:
+                print(f"[Audio] Mixer: {name} = {value}")
+        except Exception:
+            pass
+
+
 def set_volume(percent):
     level = int(60 + (percent / 100.0) * 67)
     level = max(0, min(127, level))

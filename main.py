@@ -164,6 +164,11 @@ def main():
     # Sync ALSA config so audio changes propagate on git pull
     _sync_asoundrc()
 
+    # Initialize WM8960 mixer (output routing switches, volumes).
+    # Must happen after asoundrc sync, before any audio playback.
+    from services.audio import init_mixer
+    init_mixer()
+
     from driver.whisplay import WhisplayBoard
     board = None
     for attempt in range(3):
