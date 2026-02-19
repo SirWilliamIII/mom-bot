@@ -91,7 +91,8 @@ def _kill_previous_instance():
                     ["sudo", "fuser", chip],
                     capture_output=True, text=True, timeout=3,
                 )
-                pids = result.stdout.strip().split()
+                # fuser outputs PIDs to stderr, not stdout
+                pids = (result.stderr + " " + result.stdout).strip().split()
                 for pid in pids:
                     pid = pid.strip()
                     if pid and int(pid) != my_pid:
