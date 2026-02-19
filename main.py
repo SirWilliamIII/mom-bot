@@ -148,13 +148,12 @@ def main():
             print(f"[LCD] Initialized: {board.LCD_WIDTH}x{board.LCD_HEIGHT}")
             break
         except Exception as e:
+            import traceback
+            print(f"[Driver] GPIO init failed (attempt {attempt+1}/3): {e}")
+            traceback.print_exc()
             if attempt < 2:
-                print(f"[Driver] GPIO init failed (attempt {attempt+1}/3), retrying in 3s...")
                 time.sleep(3)
             else:
-                import traceback
-                print(f"[Driver] Failed to initialize Whisplay board: {e}")
-                traceback.print_exc()
                 print("[Driver] Running in headless mode (no display/GPIO)")
                 board = None
 

@@ -10,6 +10,7 @@ Group=will
 WorkingDirectory=/home/will/mom-bot
 # Kill any stale process holding GPIO before we start
 ExecStartPre=-/usr/bin/fuser -k /dev/gpiochip4
+ExecStartPre=-/usr/bin/fuser -k /dev/gpiochip0
 ExecStartPre=-/bin/sleep 1
 ExecStart=/home/will/mom-bot/.venv/bin/python main.py
 Restart=on-failure
