@@ -8,12 +8,25 @@ Type=simple
 User=will
 Group=will
 WorkingDirectory=/home/will/mom-bot
+# 1) Kill audio so old Python can exit D-state (dsnoop/dmix block = D-state)
+ExecStartPre=-/usr/bin/pkill -9 -f arecord
+ExecStartPre=-/usr/bin/pkill -9 -f aplay
+# 2) Remove stale ALSA dsnoop (666666) and dmix (555555) IPC segments
+ExecStartPre=-/usr/bin/ipcrm -M 666666
+ExecStartPre=-/usr/bin/ipcrm -M 555555
+ExecStartPre=-/bin/sleep 1
+# 3) Kill anything still holding gpiochip handles
+ExecStartPre=-/usr/bin/fuser -k /dev/gpiochip4
+ExecStartPre=-/usr/bin/fuser -k /dev/gpiochip0
+ExecStartPre=-/bin/sleep 2
 ExecStart=/home/will/mom-bot/.venv/bin/python main.py
 Restart=on-failure
 RestartSec=5
 
-# Give the process time to say goodbye + disconnect cleanly
-TimeoutStopSec=10
+# Give the process time to clean up GPIO, then force kill
+TimeoutStopSec=8
+KillMode=mixed
+KillSignal=SIGTERM
 
 # GPIO + SPI + audio access
 SupplementaryGroups=spi gpio audio video i2c

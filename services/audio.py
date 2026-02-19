@@ -12,6 +12,45 @@ _active_playback = []
 _playback_lock = threading.Lock()
 
 
+def init_mixer():
+    """Initialize all WM8960 mixer controls for playback and capture.
+
+    After a cold boot the codec's output-mixer routing switches are OFF,
+    which means the DAC never reaches the speaker amplifier — total silence
+    even with Speaker volume at max.  This sets the full signal path:
+        PCM -> DAC -> Output Mixer -> Speaker Amplifier -> Speaker
+    """
+    card = Config.SOUND_CARD_NAME
+    dev = f"hw:{card}"
+
+    controls = [
+        # Output routing: connect DAC to the output mixer (critical!)
+        ("Left Output Mixer PCM", "on"),
+        ("Right Output Mixer PCM", "on"),
+        # DAC digital volume (0-255, 255 = 0dB)
+        ("Playback", "255"),
+        # Speaker amplifier + class D boost (0-5, adds significant gain)
+        ("Speaker", str(Config.INITIAL_VOLUME_LEVEL)),
+        ("Speaker DC Volume", "4"),
+        ("Speaker AC Volume", "4"),
+        # Capture input path
+        ("Capture", "63"),
+        ("Left Input Mixer Boost", "on"),
+        ("Right Input Mixer Boost", "on"),
+    ]
+
+    for name, value in controls:
+        try:
+            result = subprocess.run(
+                ["amixer", "-D", dev, "sset", name, value],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0:
+                print(f"[Audio] Mixer: {name} = {value}")
+        except Exception:
+            pass
+
+
 def set_volume(percent):
     level = int(60 + (percent / 100.0) * 67)
     level = max(0, min(127, level))
@@ -142,6 +181,40 @@ def start_playback_stream(sample_rate=16000):
 def _track_playback(proc):
     with _playback_lock:
         _active_playback.append(proc)
+
+
+# --- Streaming PCM playback ---
+
+def play_pcm_stream(chunks, sample_rate=24000, blocking=True):
+    """Pipe raw PCM chunks directly to aplay — playback starts immediately."""
+    device = _playback_device()
+    cmd = [
+        "aplay", "-D", device,
+        "-r", str(sample_rate), "-f", "S16_LE", "-c", "1",
+        "-t", "raw",
+    ]
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    _track_playback(proc)
+
+    try:
+        for chunk in chunks:
+            if proc.poll() is not None:
+                break
+            proc.stdin.write(chunk)
+        proc.stdin.close()
+        if blocking:
+            proc.wait()
+    except (BrokenPipeError, OSError) as e:
+        print(f"[Audio] PCM stream pipe error: {e}")
+    finally:
+        if not blocking and proc.poll() is None:
+            return proc
+        if proc.poll() is None:
+            proc.terminate()
+    return proc
 
 
 # --- File-based playback ---
