@@ -52,11 +52,8 @@ class Config:
     # --- Paths ---
     CUSTOM_FONT_PATH = os.getenv("CUSTOM_FONT_PATH", "")
     MUSIC_DIR = os.getenv("MUSIC_DIR", os.path.join(os.path.dirname(__file__), "assets", "music"))
-<<<<<<< HEAD
     IDLE_IMAGE_PATH = os.getenv("IDLE_IMAGE_PATH", os.path.join(os.path.dirname(__file__), "assets", "images", "idle.png"))
-=======
     PHOTOS_DIR = os.getenv("PHOTOS_DIR", os.path.join(os.path.dirname(__file__), "photos"))
->>>>>>> 7eb4ff4 (back at it)
 
     @classmethod
     def validate(cls):
