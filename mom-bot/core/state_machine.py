@@ -395,15 +395,18 @@ class VoiceAgentStateMachine:
 
     def _on_button_press_idle(self):
         with self._lock:
-            print("[Button] PRESSED (idle) -> starting conversation")
-            self._button_press_time = time.time()
-            self._holding = True
-            self.start_agent()
+            now = time.time()
+            if now - self._last_click_time < self.DOUBLE_CLICK_SEC:
+                print("[Button] Double-click (idle) -> starting conversation")
+                self._last_click_time = 0
+                self._button_press_time = now
+                self._holding = True
+                self.start_agent()
+            else:
+                self._last_click_time = now
 
     def _on_button_release_idle(self):
         with self._lock:
-            hold_time = time.time() - self._button_press_time
-            print(f"[Button] RELEASED (idle) hold={hold_time:.2f}s")
             self._holding = False
             if self._agent:
                 self._agent.set_input_enabled(False)
