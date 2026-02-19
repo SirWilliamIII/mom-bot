@@ -30,10 +30,25 @@ def _clear_pycache():
 
 
 def _force_kill_audio():
-    """Kill any lingering arecord/aplay processes."""
+    """Kill any lingering arecord/aplay processes and clean stale ALSA IPC.
+
+    dsnoop (ipc_key 666666) and dmix (ipc_key 555555) create System V
+    shared memory segments.  If the "server" process that owns the segment
+    dies uncleanly, any subsequent arecord/aplay trying to attach blocks in
+    uninterruptible D-state — and that blocks the Python process too.
+    Removing the stale IPC forces a fresh segment on next open.
+    """
     for proc_name in ("arecord", "aplay"):
         try:
             subprocess.run(["pkill", "-9", "-f", proc_name],
+                           capture_output=True, timeout=2)
+        except Exception:
+            pass
+
+    # Remove stale dsnoop/dmix shared-memory segments from asound.conf
+    for ipc_key in (555555, 666666):
+        try:
+            subprocess.run(["ipcrm", "-M", str(ipc_key)],
                            capture_output=True, timeout=2)
         except Exception:
             pass
@@ -163,8 +178,17 @@ def main():
             if attempt < 2:
                 time.sleep(3)
             else:
-                print("[Driver] Running in headless mode (no display/GPIO)")
-                board = None
+                # GPIO is still busy after killing everything — the old process
+                # is stuck in uninterruptible D-state (almost always a stuck
+                # ALSA driver).  Only a reboot can free it; schedule one now.
+                print("[Driver] GPIO permanently busy. Rebooting to self-heal...")
+                try:
+                    subprocess.run(["sudo", "systemctl", "reboot"],
+                                   capture_output=True, timeout=10)
+                except Exception:
+                    pass
+                time.sleep(30)   # wait for reboot to take effect
+                sys.exit(1)
 
     font_path = Config.CUSTOM_FONT_PATH or "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
