@@ -8,10 +8,13 @@ Type=simple
 User=will
 Group=will
 WorkingDirectory=/home/will/mom-bot
-# Kill any stale process holding GPIO before we start
+# Kill audio first so old Python exits D-state, then kill GPIO holders
+ExecStartPre=-/usr/bin/pkill -9 -f arecord
+ExecStartPre=-/usr/bin/pkill -9 -f aplay
+ExecStartPre=-/bin/sleep 1
 ExecStartPre=-/usr/bin/fuser -k /dev/gpiochip4
 ExecStartPre=-/usr/bin/fuser -k /dev/gpiochip0
-ExecStartPre=-/bin/sleep 1
+ExecStartPre=-/bin/sleep 2
 ExecStart=/home/will/mom-bot/.venv/bin/python main.py
 Restart=on-failure
 RestartSec=5

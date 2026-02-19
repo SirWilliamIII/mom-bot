@@ -42,13 +42,22 @@ def _force_kill_audio():
 def _kill_previous_instance():
     """Kill any previous Python process using main.py to free GPIO pins.
 
-    GPIO pins (via lgpio/gpiozero) are held at the kernel level per-process.
+    GPIO pins (via lgpio) are held at the kernel level per-process.
     If a previous run crashed or was killed without cleanup, the only way
     to free the pins is to kill that process.
+
+    Critical ordering: kill audio subprocesses (arecord/aplay) FIRST.
+    If the old Python process is blocked in a kernel audio call it enters
+    uninterruptible sleep (D-state) and won't respond to SIGKILL until
+    the blocking syscall returns.  Killing audio first unblocks it.
 
     Must also stop the systemd service first — otherwise Restart=on-failure
     will immediately respawn the killed process, re-claiming GPIO.
     """
+    # Step 1: kill audio children so the old python can exit D-state.
+    _force_kill_audio()
+    time.sleep(0.5)
+
     # Stop the systemd service if it's running (prevents respawn after kill).
     # Skip if WE are the service (INVOCATION_ID is set by systemd) — otherwise
     # we'd stop ourselves and exit before doing anything useful.
@@ -104,8 +113,8 @@ def _kill_previous_instance():
                 pass
 
     if killed_any:
-        # Kernel needs time to close fds and release GPIO claims
-        time.sleep(2.0)
+        # Give kernel time to close fds and release GPIO claims
+        time.sleep(3.0)
 
 
 def _sync_asoundrc():
@@ -133,9 +142,9 @@ def main():
     # Clear stale bytecode so git pull always takes effect
     _clear_pycache()
 
-    # Kill any previous instance (frees GPIO) + orphaned audio processes
+    # Kill any previous instance (frees GPIO); audio is killed first inside
+    # this call to unblock any D-state audio syscalls in the old process.
     _kill_previous_instance()
-    _force_kill_audio()
 
     # Sync ALSA config so audio changes propagate on git pull
     _sync_asoundrc()
