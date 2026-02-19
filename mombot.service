@@ -12,8 +12,10 @@ ExecStart=/home/will/mom-bot/.venv/bin/python main.py
 Restart=on-failure
 RestartSec=5
 
-# Give the process time to say goodbye + disconnect cleanly
-TimeoutStopSec=10
+# Give the process time to clean up GPIO, then force kill
+TimeoutStopSec=8
+KillMode=mixed
+KillSignal=SIGTERM
 
 # GPIO + SPI + audio access
 SupplementaryGroups=spi gpio audio video i2c
