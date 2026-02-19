@@ -55,6 +55,30 @@ def _force_kill_audio():
             pass
 
 
+def _gpio_chip_in_use():
+    """Check if any other process holds /dev/gpiochip4 or /dev/gpiochip0.
+
+    Returns (True, pid) if another process holds it, (False, None) otherwise.
+    """
+    my_pid = os.getpid()
+    for chip in ("/dev/gpiochip4", "/dev/gpiochip0"):
+        if not os.path.exists(chip):
+            continue
+        try:
+            result = subprocess.run(
+                ["sudo", "fuser", chip],
+                capture_output=True, text=True, timeout=3,
+            )
+            pids = (result.stderr + " " + result.stdout).strip().split()
+            for pid in pids:
+                pid = pid.strip()
+                if pid and pid.isdigit() and int(pid) != my_pid:
+                    return True, int(pid)
+        except Exception:
+            pass
+    return False, None
+
+
 def _kill_previous_instance():
     """Kill any previous Python process using main.py to free GPIO pins.
 
@@ -72,7 +96,7 @@ def _kill_previous_instance():
     """
     # Step 1: kill audio children so the old python can exit D-state.
     _force_kill_audio()
-    time.sleep(0.5)
+    time.sleep(1.0)
 
     # Stop the systemd service if it's running (prevents respawn after kill).
     # Skip if WE are the service (INVOCATION_ID is set by systemd) — otherwise
@@ -100,7 +124,7 @@ def _kill_previous_instance():
                     # SIGTERM first — lets the process run cleanup/gpio_free
                     subprocess.run(["kill", "-15", pid],
                                    capture_output=True, timeout=2)
-                    time.sleep(1)
+                    time.sleep(2)
                     # SIGKILL as backup
                     subprocess.run(["kill", "-9", pid],
                                    capture_output=True, timeout=2)
@@ -130,7 +154,23 @@ def _kill_previous_instance():
 
     if killed_any:
         # Give kernel time to close fds and release GPIO claims
-        time.sleep(3.0)
+        time.sleep(2.0)
+
+    # Verify GPIO chip is actually free — re-kill stragglers if needed.
+    for wait_secs in (1, 2, 4):
+        in_use, holder_pid = _gpio_chip_in_use()
+        if not in_use:
+            print("[Cleanup] GPIO chip is free")
+            break
+        print(f"[Cleanup] GPIO still held by PID {holder_pid}, "
+              f"killing and waiting {wait_secs}s...")
+        _force_kill_audio()
+        try:
+            subprocess.run(["kill", "-9", str(holder_pid)],
+                           capture_output=True, timeout=2)
+        except Exception:
+            pass
+        time.sleep(wait_secs)
 
 
 def _sync_asoundrc():
@@ -182,7 +222,20 @@ def main():
             print(f"[Driver] GPIO init failed (attempt {attempt+1}/3): {e}")
             traceback.print_exc()
             if attempt < 2:
-                time.sleep(3)
+                # Re-check for processes holding GPIO before retrying
+                _force_kill_audio()
+                time.sleep(0.5)
+                in_use, holder_pid = _gpio_chip_in_use()
+                if in_use:
+                    print(f"[Driver] GPIO still held by PID {holder_pid}, killing...")
+                    try:
+                        subprocess.run(["kill", "-9", str(holder_pid)],
+                                       capture_output=True, timeout=2)
+                    except Exception:
+                        pass
+                backoff = 3 * (attempt + 1)   # 3s, then 6s
+                print(f"[Driver] Waiting {backoff}s before retry...")
+                time.sleep(backoff)
             else:
                 # GPIO is still busy after killing everything — the old process
                 # is stuck in uninterruptible D-state (almost always a stuck
