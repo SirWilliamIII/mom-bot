@@ -54,7 +54,6 @@ class VoiceAgentStateMachine:
     BYE_WORDS = {"bye", "goodbye", "ok bye", "good bye", "see ya", "see you", "bye bye"}
     IDLE_TIMEOUT_SEC = 30
     IDLE_SLEEP_SEC = 120     # 2 min idle → deep sleep
-    KILL_PRESS_SEC = 10.0
     DOUBLE_CLICK_SEC = 0.4
     RESPONSE_DELAY_SEC = 0.5
     TAP_THRESHOLD_SEC = 0.3   # press shorter than this = tap (not push-to-talk)
@@ -79,7 +78,6 @@ class VoiceAgentStateMachine:
         self._paused = False
 
         # Timers (all guarded by epoch)
-        self._kill_timer = None
         self._idle_timer = None
         self._single_click_timer = None
 
@@ -114,7 +112,7 @@ class VoiceAgentStateMachine:
             setattr(self, attr_name, None)
 
     def _cancel_all_timers(self):
-        for name in ("_kill_timer", "_idle_timer", "_single_click_timer"):
+        for name in ("_idle_timer",):
             self._cancel_timer(name)
 
     # --- Agent lifecycle ---
@@ -467,11 +465,6 @@ class VoiceAgentStateMachine:
 
             self._touch_activity()
 
-            # 10s hold = deep sleep
-            self._kill_timer = self._start_timer(
-                self.KILL_PRESS_SEC, self._on_kill_press
-            )
-
     def _on_button_release_active(self):
         with self._lock:
             self._cancel_timer("_kill_timer")
@@ -543,16 +536,6 @@ class VoiceAgentStateMachine:
                 text="Paused — tap to resume",
                 turn="paused",
             )
-
-    def _on_kill_press(self):
-        """Fired when button is held for 10s — enters deep sleep."""
-        print("[Button] 10s hold -> deep sleep")
-        # Disconnect agent in a thread (blocking work)
-        agent = self._agent
-        self._agent = None
-        if agent:
-            threading.Thread(target=agent.disconnect, daemon=True).start()
-        self._set_state("asleep")
 
     # --- Voice Agent event handler ---
 
@@ -688,11 +671,22 @@ class VoiceAgentStateMachine:
 # ---------- LEGACY MODE (old batch pipeline) ----------
 
 class LegacyStateMachine:
-    """Original batch-mode state machine (button → record → STT → LLM → TTS)."""
+    """Batch-mode state machine (button → record → STT → LLM → TTS).
+
+    Button behavior:
+        double-click  = toggle sleep/wake (from any state)
+        hold          = listen (record audio while held)
+        release       = stop recording → think → speak
+        press while speaking = silence Piglet, start listening
+
+    States: asleep → idle → listening → thinking → speaking → idle
+    """
+
+    DOUBLE_CLICK_SEC = 0.4  # max gap between clicks to count as double-click
+    PHOTO_CYCLE_SEC = 12    # seconds between photo changes in idle
 
     def __init__(self, board, render_thread):
-        from services import stt, llm, tts
-        from services.audio import start_recording, stop_recording, set_volume, set_capture_volume
+        from services.audio import set_volume, set_capture_volume
 
         self.board = board
         self.render_thread = render_thread
@@ -702,11 +696,31 @@ class LegacyStateMachine:
         self._recording_path = ""
         self._answer_id = 0
         self._active_game = None
+        self._last_press_time = 0
+        self._holding = False
+        self._photo_timer = None
+        self._photos = self._scan_photos()
+        self._photo_index = 0
 
         set_volume(100)
         set_capture_volume(100)
 
-        self._set_state("idle")
+        self._set_state("asleep")
+
+    def _scan_photos(self):
+        """Scan photos directory for images."""
+        photos_dir = Config.PHOTOS_DIR
+        if not os.path.isdir(photos_dir):
+            print(f"[Photos] Directory not found: {photos_dir}")
+            return []
+        exts = (".jpg", ".jpeg", ".png", ".bmp")
+        photos = sorted([
+            os.path.join(photos_dir, f)
+            for f in os.listdir(photos_dir)
+            if f.lower().endswith(exts)
+        ])
+        print(f"[Photos] Found {len(photos)} photos")
+        return photos
 
     def stop(self):
         self.running = False
@@ -714,18 +728,26 @@ class LegacyStateMachine:
         stop_recording()
         if self._active_game:
             self._active_game.stop()
+        if self.board:
+            self.board.set_rgb(0, 0, 0)
+            self.board.screen_off()
 
     def _set_state(self, new_state, **kwargs):
         old = self.state
         self.state = new_state
         print(f"[State] {old} -> {new_state}")
 
+        # Stop photo slideshow when leaving idle
+        if self._photo_timer:
+            self._photo_timer.cancel()
+            self._photo_timer = None
+        # Clear any displayed photo when leaving idle
+        if old == "idle" and new_state != "idle":
+            display_state.update(image_path="")
+
         if self.board:
             self.board.on_button_press(None)
             self.board.on_button_release(None)
-
-            if new_state == "listening":
-                self.board.on_button_release(self._on_release_from_listening)
 
         handler = {
             "idle": self._enter_idle,
@@ -734,22 +756,120 @@ class LegacyStateMachine:
             "speaking": self._enter_speaking,
             "game": self._enter_game,
             "music": self._enter_music,
+            "asleep": self._enter_asleep,
         }.get(new_state)
 
         if handler:
             handler(**kwargs)
 
+    # --- Double-click detection (works in all awake states) ---
+
+    def _on_button_press(self):
+        """Universal press handler for awake states.
+
+        Double-click → sleep. Single press → start listening.
+        We detect double-click on the SECOND press, so there's
+        no delay on single press — listening starts immediately.
+        """
+        now = time.time()
+        gap = now - self._last_press_time
+        self._last_press_time = now
+
+        if gap < self.DOUBLE_CLICK_SEC:
+            # Double-click → sleep
+            print("[Button] Double-click -> asleep")
+            self._last_press_time = 0
+            from services.audio import stop_playback, stop_recording
+            self._answer_id += 1
+            stop_playback()
+            stop_recording()
+            self._set_state("asleep")
+            return
+
+        # Single press → listen
+        self._holding = True
+        if self.state == "speaking":
+            self._interrupt_and_listen()
+        elif self.state != "listening":
+            self._set_state("listening")
+
+    def _on_button_release(self):
+        """Universal release handler — stop recording if we were listening."""
+        self._holding = False
+        if self.state == "listening":
+            self._on_release_from_listening()
+
+    # --- Sleep / Wake ---
+
+    def _enter_asleep(self, **kwargs):
+        """Screen off, LED off. Double-click to wake."""
+        self._last_press_time = 0
+        if self.render_thread:
+            self.render_thread.running = False
+            time.sleep(0.05)
+        if self.board:
+            self.board.set_rgb(0, 0, 0)
+            self.board.screen_off()
+            self.board.on_button_press(self._on_button_press_asleep)
+        print("[State] Asleep — double-click to wake")
+
+    def _on_button_press_asleep(self):
+        """Double-click while asleep wakes the device."""
+        now = time.time()
+        gap = now - self._last_press_time
+        self._last_press_time = now
+
+        if gap < self.DOUBLE_CLICK_SEC:
+            print("[Button] Double-click -> waking up")
+            self._last_press_time = 0
+            self._wake_up()
+
+    def _wake_up(self):
+        """Restart render thread and go to idle."""
+        if self.board:
+            self.board.screen_on()
+        if self.render_thread:
+            new_render = RenderThread(
+                self.render_thread.board,
+                self.render_thread.font_path,
+                self.render_thread.fps,
+            )
+            new_render.start()
+            self.render_thread = new_render
+        self._set_state("idle")
+
+    # --- Idle ---
+
     def _enter_idle(self, **kwargs):
         self._update_display(
             status="idle",
             emoji="🐷",
-            text=kwargs.get("text", "Press and hold to talk to me!"),
+            text=kwargs.get("text", "Hold button to talk!"),
             turn="sleep",
             scroll_speed=0,
         )
 
+        # Start photo slideshow if photos exist
+        if self._photos:
+            self._show_next_photo()
+
         if self.board:
-            self.board.on_button_press(lambda: self._set_state("listening"))
+            self.board.on_button_press(self._on_button_press)
+            self.board.on_button_release(self._on_button_release)
+
+    def _show_next_photo(self):
+        """Show next photo and schedule the one after."""
+        if not self._photos or self.state != "idle":
+            return
+        photo = self._photos[self._photo_index % len(self._photos)]
+        self._photo_index = (self._photo_index + 1) % len(self._photos)
+        display_state.update(image_path=photo)
+        # Schedule next photo
+        self._photo_timer = threading.Timer(self.PHOTO_CYCLE_SEC, self._show_next_photo)
+        self._photo_timer.daemon = True
+        self._photo_timer.start()
+
+    # --- Listening ---
 
     def _enter_listening(self, **kwargs):
         from services.audio import start_recording
@@ -767,6 +887,10 @@ class LegacyStateMachine:
         )
 
         start_recording(self._recording_path)
+
+        if self.board:
+            self.board.on_button_press(self._on_button_press)
+            self.board.on_button_release(self._on_button_release)
 
     def _on_release_from_listening(self):
         from services.audio import stop_recording
@@ -788,6 +912,8 @@ class LegacyStateMachine:
             return
         self._set_state("thinking")
 
+    # --- Thinking ---
+
     def _enter_thinking(self, **kwargs):
         self._update_display(
             status="thinking",
@@ -798,7 +924,8 @@ class LegacyStateMachine:
         )
 
         if self.board:
-            self.board.on_button_press(lambda: self._set_state("listening"))
+            self.board.on_button_press(self._on_button_press)
+            self.board.on_button_release(self._on_button_release)
 
         thread = threading.Thread(target=self._process_voice, daemon=True)
         thread.start()
@@ -839,7 +966,8 @@ class LegacyStateMachine:
         )
 
         if self.board:
-            self.board.on_button_press(lambda: self._interrupt_and_listen())
+            self.board.on_button_press(self._on_button_press)
+            self.board.on_button_release(self._on_button_release)
 
         thread = threading.Thread(
             target=self._generate_and_speak,
@@ -994,3 +1122,4 @@ def _extract_emojis(text):
         if unicodedata.category(ch) in ("So", "Sk") or ord(ch) > 0x1F000:
             emojis += ch
     return emojis[-1] if emojis else ""
+
