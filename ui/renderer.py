@@ -456,7 +456,10 @@ class RenderThread(threading.Thread):
                     nh = int(iw / ratio)
                     top = (ih - nh) // 2
                     img = img.crop((0, top, iw, top + nh))
-                state.image_obj = img.resize((W, H), Image.LANCZOS)
+                loaded = img.resize((W, H), Image.LANCZOS)
+                # Write back to the real display_state so it's cached across frames
+                display_state.image_obj = loaded
+                state.image_obj = loaded
             except Exception as e:
                 print(f"[Render] Image load error: {e}")
                 return
