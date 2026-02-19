@@ -348,11 +348,12 @@ class VoiceAgentStateMachine:
             print(f"[State] Idle for {self.IDLE_SLEEP_SEC}s -> deep sleep")
             self._set_state("asleep")
 
-    # --- Backlight flash ---
+    # --- Notification flash (backlight + LED) ---
 
     _flash_lock = threading.Lock()
 
-    def _flash_backlight(self, times=2, on_ms=80, off_ms=60):
+    def _notify_flash(self, times=2, on_ms=80, off_ms=60):
+        """Quick backlight + LED pulse to signal 'new content'."""
         if not self.board:
             return
         if not self._flash_lock.acquire(blocking=False):
@@ -360,9 +361,12 @@ class VoiceAgentStateMachine:
 
         def _do_flash():
             try:
+                saved_rgb = self._current_rgb or (0, 0, 0)
                 for _ in range(times):
+                    self.board.set_rgb(255, 255, 255)
                     self.board.set_backlight(0)
                     time.sleep(off_ms / 1000)
+                    self.board.set_rgb(*saved_rgb)
                     self.board.set_backlight(100)
                     time.sleep(on_ms / 1000)
             except Exception as e:
@@ -511,7 +515,7 @@ class VoiceAgentStateMachine:
 
             if role == "assistant" and content:
                 self._touch_activity()
-                self._flash_backlight(times=2)
+                self._notify_flash(times=2)
                 emojis = _extract_emojis(content)
                 self._update_display(
                     text=content,
