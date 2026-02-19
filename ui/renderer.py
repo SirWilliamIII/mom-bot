@@ -124,6 +124,12 @@ class RenderThread(threading.Thread):
         self._prev_status = None       # track status changes for particle bursts
         self._last_frame_time = time.time()
 
+        # LED sync: smooth fade matching screen transition duration
+        self._led_current = (0, 0, 0)
+        self._led_target = (0, 0, 0)
+        self._led_prev = (0, 0, 0)
+        self._led_fade_start = 0.0
+
     def _render_logo(self):
         logo_path = os.path.join("assets", "images", "logo.png")
         if os.path.exists(logo_path):
@@ -176,65 +182,59 @@ class RenderThread(threading.Thread):
         if state.game_surface is not None:
             data = ImageUtils.image_to_rgb565(state.game_surface, W, H)
             self.board.draw_image(0, 0, W, H, data)
+            self._sync_led(state.rgb_color or (0, 0, 0))
             return
 
         if state.image_path:
             self._render_image(state, W, H)
+            self._sync_led(state.rgb_color or (0, 0, 0))
             return
 
         header_h = Layout.HEADER_H
         footer_h = Layout.FOOTER_H
+        text_h = H - header_h - footer_h
 
+        # --- Render each section ---
         header = Image.new("RGBA", (W, header_h), theme.background)
         hd = ImageDraw.Draw(header)
         self._render_header(header, hd, state, W, theme, mood, now)
 
-        # Draw particles on the header (they float upward from the pig)
         if self._particles.active:
             self._particles.update_and_draw(header, dt)
 
-        self.board.draw_image(
-            0, 0, W, header_h,
-            ImageUtils.image_to_rgb565(header, W, header_h),
-        )
-
-        text_h = H - header_h - footer_h
         text_img = Image.new("RGBA", (W, text_h), theme.panel_alt)
         td = ImageDraw.Draw(text_img)
         pad = Layout.PAD
         Components.draw_panel(
             td,
-            pad // 2,
-            pad // 2,
-            W - pad // 2 - 1,
-            text_h - pad // 2 - 1,
-            fill=theme.panel,
-            border=theme.border,
-            radius=12,
+            pad // 2, pad // 2,
+            W - pad // 2 - 1, text_h - pad // 2 - 1,
+            fill=theme.panel, border=theme.border, radius=12,
         )
         self._render_text_area(text_img, text_h, state, W, theme)
-        self.board.draw_image(
-            0, header_h, W, text_h,
-            ImageUtils.image_to_rgb565(text_img, W, text_h),
-        )
 
         footer_img = Image.new("RGBA", (W, footer_h), theme.panel_alt)
         fd = ImageDraw.Draw(footer_img)
         Components.draw_footer(
-            fd,
-            width=W,
-            height=footer_h,
+            fd, width=W, height=footer_h,
             hint=hint_for_status(state.status),
-            font=self.battery_font,
-            theme=theme,
-        )
-        self.board.draw_image(
-            0, header_h + text_h, W, footer_h,
-            ImageUtils.image_to_rgb565(footer_img, W, footer_h),
+            font=self.battery_font, theme=theme,
         )
 
-        if state.alert_text and time.time() < state.alert_until:
-            self._render_alert(state, W, H, theme)
+        # --- Composite into single frame for atomic LCD push ---
+        canvas = Image.new("RGBA", (W, H), theme.background)
+        canvas.paste(header, (0, 0))
+        canvas.paste(text_img, (0, header_h))
+        canvas.paste(footer_img, (0, header_h + text_h))
+
+        if state.alert_text and now < state.alert_until:
+            self._compose_alert(canvas, state, W, H, theme)
+
+        # Single atomic push — header, body, footer all appear at once
+        self.board.draw_image(0, 0, W, H, ImageUtils.image_to_rgb565(canvas, W, H))
+
+        # Sync LED color with the frame (smooth fade)
+        self._sync_led(state.rgb_color or (0, 0, 0))
 
     def _maybe_emit_particles(self, state, width):
         """Emit particles on meaningful status changes."""
@@ -325,37 +325,49 @@ class RenderThread(threading.Thread):
         y = image.height - 8
         draw.rounded_rectangle([16, y, width - 16, y + 4], radius=2, fill=color)
 
-    def _render_alert(self, state, W, H, theme):
+    def _compose_alert(self, canvas, state, W, H, theme):
+        """Render alert overlay onto the canvas (composited before LCD push)."""
         alert_h = 34
         alert_img = Image.new("RGBA", (W, alert_h), (0, 0, 0, 0))
         ad = ImageDraw.Draw(alert_img)
         color = alert_color_for_level(theme, state.alert_level)
         Components.draw_panel(
-            ad,
-            6,
-            2,
-            W - 7,
-            alert_h - 2,
+            ad, 6, 2, W - 7, alert_h - 2,
             fill=(color[0], color[1], color[2], 235),
-            border=theme.border,
-            radius=8,
+            border=theme.border, radius=8,
         )
         msg = state.alert_text[:46]
         TextUtils.draw_mixed_text(
-            ad,
-            alert_img,
-            msg,
-            self.battery_font,
-            (12, 9),
+            ad, alert_img, msg,
+            self.battery_font, (12, 9),
             fill=theme.text_soft,
         )
-        self.board.draw_image(
-            0,
-            H - alert_h - Layout.FOOTER_H,
-            W,
-            alert_h,
-            ImageUtils.image_to_rgb565(alert_img, W, alert_h),
-        )
+        alert_y = H - alert_h - Layout.FOOTER_H
+        canvas.paste(alert_img, (0, alert_y), alert_img)
+
+    _LED_FADE_DURATION = 0.3  # seconds — matches screen transition
+
+    def _sync_led(self, target_rgb):
+        """Update physical LED with smooth interpolation synced to screen."""
+        if target_rgb != self._led_target:
+            self._led_prev = self._led_current
+            self._led_target = target_rgb
+            self._led_fade_start = time.time()
+
+        elapsed = time.time() - self._led_fade_start
+        if elapsed >= self._LED_FADE_DURATION:
+            rgb = self._led_target
+        else:
+            t = elapsed / self._LED_FADE_DURATION
+            t = 1.0 - (1.0 - t) ** 3  # ease-out cubic
+            rgb = tuple(
+                max(0, min(255, int(self._led_prev[i] + (self._led_target[i] - self._led_prev[i]) * t)))
+                for i in range(3)
+            )
+
+        if rgb != self._led_current:
+            self._led_current = rgb
+            self.board.set_rgb(*rgb)
 
     def _render_battery(self, draw, state, image_width):
         bw, bh = 26, 15

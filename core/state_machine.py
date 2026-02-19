@@ -52,8 +52,6 @@ class VoiceAgentStateMachine:
     DOUBLE_CLICK_SEC = 0.4
     RESPONSE_DELAY_SEC = 0.5
 
-    _RGB_MIN_INTERVAL = 0.4
-
     def __init__(self, board, render_thread):
         self.board = board
         self.render_thread = render_thread
@@ -66,8 +64,6 @@ class VoiceAgentStateMachine:
         self._button_press_time = 0
         self._holding = False
         self._last_click_time = 0
-        self._current_rgb = None
-        self._last_rgb_time = 0
 
         # Timers (all guarded by epoch)
         self._kill_timer = None
@@ -569,19 +565,12 @@ class VoiceAgentStateMachine:
     # --- Display helper ---
 
     def _update_display(self, **kwargs):
-        # If turn is specified, derive RGB from it
+        # Derive RGB target from turn — render thread handles smooth LED fade
         turn = kwargs.get("turn")
         if turn and turn in TURN_RGB:
-            kwargs["rgb"] = TURN_RGB[turn]
-
-        if "rgb" in kwargs and self.board:
-            rgb = kwargs.pop("rgb")
-            now = time.time()
-            if rgb != self._current_rgb and (now - self._last_rgb_time) >= self._RGB_MIN_INTERVAL:
-                self._current_rgb = rgb
-                self._last_rgb_time = now
-                self.board.set_rgb(*rgb)
-            kwargs["rgb_color"] = rgb
+            kwargs["rgb_color"] = TURN_RGB[turn]
+        if "rgb" in kwargs:
+            kwargs["rgb_color"] = kwargs.pop("rgb")
         display_state.update(**kwargs)
 
 
@@ -862,14 +851,12 @@ class LegacyStateMachine:
         self._set_state("idle", text="That was fun! Want to play again?")
 
     def _update_display(self, **kwargs):
+        # Derive RGB target from turn — render thread handles smooth LED fade
         turn = kwargs.get("turn")
         if turn and turn in TURN_RGB:
-            kwargs["rgb"] = TURN_RGB[turn]
-
-        if "rgb" in kwargs and self.board:
-            r, g, b = kwargs.pop("rgb")
-            self.board.set_rgb(r, g, b)
-            kwargs["rgb_color"] = (r, g, b)
+            kwargs["rgb_color"] = TURN_RGB[turn]
+        if "rgb" in kwargs:
+            kwargs["rgb_color"] = kwargs.pop("rgb")
         display_state.update(**kwargs)
 
 
