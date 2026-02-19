@@ -1,7 +1,0 @@
-Pin Function,Pin Number,Pin Function,Pin Number,Pin Function,Pin Number,Pin Function,Pin Number
-5V,"P2, P4",LED1,P22,LCDCTRL,P15,I2SWS,P35
-GND,GND,LED2,P18,SPI_RST,P7,I2SDIN,P38
-I2CDAT,P3,LED3,P16,SPI_DC,P13,I2SDOUT,P40
-I2CCLK,P5,,,SPI_MOSI,P19,,
-KEY,P11,,,SPI_CLK,P23,,
-,,,,SPI_CS,P24,,

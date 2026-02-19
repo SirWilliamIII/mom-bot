@@ -52,6 +52,8 @@ class VoiceAgentStateMachine:
     DOUBLE_CLICK_SEC = 0.4
     RESPONSE_DELAY_SEC = 0.5
 
+    _RGB_MIN_INTERVAL = 0.4
+
     def __init__(self, board, render_thread):
         self.board = board
         self.render_thread = render_thread
@@ -64,6 +66,8 @@ class VoiceAgentStateMachine:
         self._button_press_time = 0
         self._holding = False
         self._last_click_time = 0
+        self._current_rgb = None
+        self._last_rgb_time = 0
 
         # Timers (all guarded by epoch)
         self._kill_timer = None
@@ -114,6 +118,7 @@ class VoiceAgentStateMachine:
             text="I'm listening...",
             turn="green",
             scroll_speed=0,
+            image_path="",
         )
 
         self._agent = VoiceAgent(on_event=self._on_agent_event)
@@ -225,13 +230,25 @@ class VoiceAgentStateMachine:
     def _enter_idle(self, **kwargs):
         name = Config.COMPANION_NAME
         text = kwargs.get("text", f"Hold button to talk to {name}!")
-        self._update_display(
-            status="sleeping",
-            emoji="🐷",
-            text=text,
-            turn="sleep",
-            scroll_speed=0,
-        )
+        # Show family photo on idle screen (if configured), otherwise fall back
+        idle_img = Config.IDLE_IMAGE_PATH
+        if idle_img and os.path.exists(idle_img):
+            self._update_display(
+                status="sleeping",
+                emoji="🐷",
+                text=text,
+                turn="sleep",
+                scroll_speed=0,
+                image_path=idle_img,
+            )
+        else:
+            self._update_display(
+                status="sleeping",
+                emoji="🐷",
+                text=text,
+                turn="sleep",
+                scroll_speed=0,
+            )
         if self.board:
             self.board.on_button_press(self._on_button_press_idle)
             self.board.on_button_release(self._on_button_release_idle)
@@ -242,6 +259,8 @@ class VoiceAgentStateMachine:
 
     def _enter_active(self, **kwargs):
         name = Config.COMPANION_NAME
+        # Clear idle image — active states use Piglet sprite
+        display_state.update(image_path="")
         # Don't overwrite "listening" display if user is still holding button
         if not self._holding:
             self._update_display(
@@ -344,11 +363,12 @@ class VoiceAgentStateMachine:
             print(f"[State] Idle for {self.IDLE_SLEEP_SEC}s -> deep sleep")
             self._set_state("asleep")
 
-    # --- Backlight flash ---
+    # --- Notification flash (backlight + LED) ---
 
     _flash_lock = threading.Lock()
 
-    def _flash_backlight(self, times=2, on_ms=80, off_ms=60):
+    def _notify_flash(self, times=2, on_ms=80, off_ms=60):
+        """Quick backlight + LED pulse to signal 'new content'."""
         if not self.board:
             return
         if not self._flash_lock.acquire(blocking=False):
@@ -356,9 +376,12 @@ class VoiceAgentStateMachine:
 
         def _do_flash():
             try:
+                saved_rgb = self._current_rgb or (0, 0, 0)
                 for _ in range(times):
+                    self.board.set_rgb(255, 255, 255)
                     self.board.set_backlight(0)
                     time.sleep(off_ms / 1000)
+                    self.board.set_rgb(*saved_rgb)
                     self.board.set_backlight(100)
                     time.sleep(on_ms / 1000)
             except Exception as e:
@@ -372,15 +395,18 @@ class VoiceAgentStateMachine:
 
     def _on_button_press_idle(self):
         with self._lock:
-            print("[Button] PRESSED (idle) -> starting conversation")
-            self._button_press_time = time.time()
-            self._holding = True
-            self.start_agent()
+            now = time.time()
+            if now - self._last_click_time < self.DOUBLE_CLICK_SEC:
+                print("[Button] Double-click (idle) -> starting conversation")
+                self._last_click_time = 0
+                self._button_press_time = now
+                self._holding = True
+                self.start_agent()
+            else:
+                self._last_click_time = now
 
     def _on_button_release_idle(self):
         with self._lock:
-            hold_time = time.time() - self._button_press_time
-            print(f"[Button] RELEASED (idle) hold={hold_time:.2f}s")
             self._holding = False
             if self._agent:
                 self._agent.set_input_enabled(False)
@@ -507,7 +533,7 @@ class VoiceAgentStateMachine:
 
             if role == "assistant" and content:
                 self._touch_activity()
-                self._flash_backlight(times=2)
+                self._notify_flash(times=2)
                 emojis = _extract_emojis(content)
                 self._update_display(
                     text=content,
@@ -565,12 +591,19 @@ class VoiceAgentStateMachine:
     # --- Display helper ---
 
     def _update_display(self, **kwargs):
-        # Derive RGB target from turn — render thread handles smooth LED fade
+        # If turn is specified, derive RGB from it
         turn = kwargs.get("turn")
         if turn and turn in TURN_RGB:
-            kwargs["rgb_color"] = TURN_RGB[turn]
-        if "rgb" in kwargs:
-            kwargs["rgb_color"] = kwargs.pop("rgb")
+            kwargs["rgb"] = TURN_RGB[turn]
+
+        if "rgb" in kwargs and self.board:
+            rgb = kwargs.pop("rgb")
+            now = time.time()
+            if rgb != self._current_rgb and (now - self._last_rgb_time) >= self._RGB_MIN_INTERVAL:
+                self._current_rgb = rgb
+                self._last_rgb_time = now
+                self.board.set_rgb(*rgb)
+            kwargs["rgb_color"] = rgb
         display_state.update(**kwargs)
 
 
@@ -851,12 +884,14 @@ class LegacyStateMachine:
         self._set_state("idle", text="That was fun! Want to play again?")
 
     def _update_display(self, **kwargs):
-        # Derive RGB target from turn — render thread handles smooth LED fade
         turn = kwargs.get("turn")
         if turn and turn in TURN_RGB:
-            kwargs["rgb_color"] = TURN_RGB[turn]
-        if "rgb" in kwargs:
-            kwargs["rgb_color"] = kwargs.pop("rgb")
+            kwargs["rgb"] = TURN_RGB[turn]
+
+        if "rgb" in kwargs and self.board:
+            r, g, b = kwargs.pop("rgb")
+            self.board.set_rgb(r, g, b)
+            kwargs["rgb_color"] = (r, g, b)
         display_state.update(**kwargs)
 
 
