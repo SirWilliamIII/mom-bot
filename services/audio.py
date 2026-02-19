@@ -31,8 +31,8 @@ def init_mixer():
         ("Playback", "255"),
         # Speaker amplifier + class D boost (0-5, adds significant gain)
         ("Speaker", str(Config.INITIAL_VOLUME_LEVEL)),
-        ("Speaker DC Volume", "4"),
-        ("Speaker AC Volume", "4"),
+        ("Speaker DC Volume", "5"),
+        ("Speaker AC Volume", "5"),
         # Capture input path
         ("Capture", "63"),
         ("Left Input Mixer Boost", "on"),

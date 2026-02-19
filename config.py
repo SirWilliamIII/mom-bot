@@ -46,7 +46,7 @@ class Config:
     CHAT_HISTORY_RESET_TIME = int(os.getenv("CHAT_HISTORY_RESET_TIME", "300"))
 
     # --- Audio hardware ---
-    INITIAL_VOLUME_LEVEL = int(os.getenv("INITIAL_VOLUME_LEVEL", "114"))
+    INITIAL_VOLUME_LEVEL = int(os.getenv("INITIAL_VOLUME_LEVEL", "127"))
     SOUND_CARD_NAME = os.getenv("SOUND_CARD_NAME", "wm8960soundcard")
 
     # --- Paths ---
