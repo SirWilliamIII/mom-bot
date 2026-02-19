@@ -116,8 +116,8 @@ def start_recording(output_path):
             output_path,
         ]
         _recording_process = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+ )
         print(f"[Audio] Recording started: {output_path}")
         return _recording_process
 

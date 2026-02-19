@@ -25,7 +25,7 @@ class Config:
     # --- Deepgram Voice Agent API ---
     DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
     DEEPGRAM_STT_MODEL = os.getenv("DEEPGRAM_STT_MODEL", "flux-general-en")
-    DEEPGRAM_TTS_MODEL = os.getenv("DEEPGRAM_TTS_MODEL", "aura-2-thalia-en")
+    DEEPGRAM_TTS_MODEL = os.getenv("DEEPGRAM_TTS_MODEL", "aura-2-iris-en")
     DEEPGRAM_INPUT_SAMPLE_RATE = int(os.getenv("DEEPGRAM_INPUT_SAMPLE_RATE", "16000"))
     DEEPGRAM_TTS_SAMPLE_RATE = int(os.getenv("DEEPGRAM_TTS_SAMPLE_RATE", "16000"))
     DEEPGRAM_LLM_PROVIDER = os.getenv("DEEPGRAM_LLM_PROVIDER", "open_ai")
@@ -52,7 +52,11 @@ class Config:
     # --- Paths ---
     CUSTOM_FONT_PATH = os.getenv("CUSTOM_FONT_PATH", "")
     MUSIC_DIR = os.getenv("MUSIC_DIR", os.path.join(os.path.dirname(__file__), "assets", "music"))
+<<<<<<< HEAD
     IDLE_IMAGE_PATH = os.getenv("IDLE_IMAGE_PATH", os.path.join(os.path.dirname(__file__), "assets", "images", "idle.png"))
+=======
+    PHOTOS_DIR = os.getenv("PHOTOS_DIR", os.path.join(os.path.dirname(__file__), "photos"))
+>>>>>>> 7eb4ff4 (back at it)
 
     @classmethod
     def validate(cls):
@@ -78,3 +82,4 @@ class Config:
                 print(f"[Config Error] {e}")
             return False
         return True
+

@@ -201,8 +201,8 @@ def main():
     render_thread = None
     if board:
         render_thread = RenderThread(board, font_path, fps=30)
-        render_thread.start()
-        board.set_backlight(100)
+        # Don't start render thread yet — SM starts asleep.
+        # RenderThread will be started on first wake.
 
     sm = create_state_machine(board, render_thread)
 
@@ -264,3 +264,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
