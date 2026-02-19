@@ -1,7 +1,7 @@
 import os
 import tempfile
 from config import Config
-from services.audio import play_audio_file
+from services.audio import play_audio_file, play_pcm_stream
 
 
 def synthesize_and_play(text):
@@ -25,9 +25,24 @@ def synthesize_to_file(text, output_path=None):
 
 
 def _openai_tts(text):
-    path = _openai_tts_to_file(text)
-    if path:
-        play_audio_file(path, blocking=True)
+    """Stream TTS directly to speaker — playback starts as first bytes arrive."""
+    from openai import OpenAI
+    client = OpenAI(api_key=Config.OPENAI_API_KEY)
+
+    try:
+        with client.audio.speech.with_streaming_response.create(
+            model="tts-1",
+            voice=Config.OPENAI_TTS_VOICE,
+            input=text,
+            response_format="pcm",
+        ) as response:
+            play_pcm_stream(response.iter_bytes(4096), sample_rate=24000, blocking=True)
+    except Exception as e:
+        print(f"[TTS] OpenAI stream error: {e}")
+        # Fallback: download to file
+        path = _openai_tts_to_file(text)
+        if path:
+            play_audio_file(path, blocking=True)
 
 
 def _openai_tts_to_file(text, output_path=None):
