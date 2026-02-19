@@ -1,7 +1,7 @@
 from services.audio import set_volume
 from features.music_player import music_player
 
-_current_volume = 70
+_current_volume = 100
 
 # --- Legacy format (OpenAI function calling, used when VOICE_AGENT_MODE=false) ---
 TOOL_DEFINITIONS = [

@@ -28,16 +28,22 @@ class VoiceAgentStateMachine:
         asleep  → screen off, LED off, process alive, button polling active
                 → double-click = wake up → idle
         idle    → showing sleep screen, waiting for user
-                → hold button = connect agent + start talking → active
+                → double-click = connect agent + start talking → active
                 → 2 min idle → asleep
         active  → hold button = push-to-talk (mic live while held)
                 → release button = agent responds after 0.5s delay
+                → single tap = toggle pause/unpause
                 → double-click = end conversation → asleep
                 → hold ≥10s = deep sleep → asleep
                 → user says 'bye'/'goodbye' = end conversation → asleep
                 → 30s no activity = end conversation → asleep
         game    → local game running, agent paused
         music   → music playing, agent still active
+
+    Button interaction summary:
+        double-click  → start / end conversation
+        hold          → push-to-talk
+        single tap    → pause / unpause (during conversation)
 
     Threading safety:
         All state mutations and timer callbacks are guarded by self._lock.
@@ -51,6 +57,7 @@ class VoiceAgentStateMachine:
     KILL_PRESS_SEC = 10.0
     DOUBLE_CLICK_SEC = 0.4
     RESPONSE_DELAY_SEC = 0.5
+    TAP_THRESHOLD_SEC = 0.3   # press shorter than this = tap (not push-to-talk)
 
     _RGB_MIN_INTERVAL = 0.4
 
@@ -69,12 +76,15 @@ class VoiceAgentStateMachine:
         self._current_rgb = None
         self._last_rgb_time = 0
 
+        self._paused = False
+
         # Timers (all guarded by epoch)
         self._kill_timer = None
         self._idle_timer = None
+        self._single_click_timer = None
 
         from services.audio import set_volume, set_capture_volume
-        set_volume(70)
+        set_volume(100)
         set_capture_volume(100)
 
         self._set_state("asleep")
@@ -104,13 +114,14 @@ class VoiceAgentStateMachine:
             setattr(self, attr_name, None)
 
     def _cancel_all_timers(self):
-        for name in ("_kill_timer", "_idle_timer"):
+        for name in ("_kill_timer", "_idle_timer", "_single_click_timer"):
             self._cancel_timer(name)
 
     # --- Agent lifecycle ---
 
     def start_agent(self):
         from services.voice_agent import VoiceAgent
+        self._paused = False
 
         self._update_display(
             status="listening",
@@ -317,6 +328,7 @@ class VoiceAgentStateMachine:
         Button polling continues — double-click wakes back to idle.
         """
         self._holding = False
+        self._paused = False
         # Stop rendering first so no frame draws over our black screen
         if self.render_thread:
             self.render_thread.running = False
@@ -425,6 +437,9 @@ class VoiceAgentStateMachine:
             self._button_press_time = time.time()
             self._holding = True
 
+            # A new press cancels any pending single-click (might be double-click)
+            self._cancel_timer("_single_click_timer")
+
             now = time.time()
             if now - self._last_click_time < self.DOUBLE_CLICK_SEC:
                 print("[Button] Double-click -> ending conversation")
@@ -437,16 +452,19 @@ class VoiceAgentStateMachine:
                 ).start()
                 return
 
-            # Silence agent and enable mic (push-to-talk)
-            if self._agent:
-                self._agent.silence_agent()
-                self._agent.set_input_enabled(True)
-            self._update_display(
-                status="listening",
-                emoji="🎤",
-                text="I'm listening...",
-                turn="green",
-            )
+            if not self._paused:
+                # Normal PTT: silence agent and enable mic
+                if self._agent:
+                    self._agent.silence_agent()
+                    self._agent.set_input_enabled(True)
+                self._update_display(
+                    status="listening",
+                    emoji="🎤",
+                    text="I'm listening...",
+                    turn="green",
+                )
+            # If paused: don't start PTT — wait for release to see tap vs hold
+
             self._touch_activity()
 
             # 10s hold = deep sleep
@@ -458,19 +476,73 @@ class VoiceAgentStateMachine:
         with self._lock:
             self._cancel_timer("_kill_timer")
 
+            hold_duration = time.time() - self._button_press_time
             self._holding = False
+
+            # Short tap → schedule single-click (pause/unpause toggle)
+            if hold_duration < self.TAP_THRESHOLD_SEC:
+                if not self._paused and self._agent:
+                    # Undo the brief PTT we started on press
+                    self._agent.set_input_enabled(False)
+                self._last_click_time = time.time()
+                self._single_click_timer = self._start_timer(
+                    self.DOUBLE_CLICK_SEC, self._on_single_click
+                )
+                return
+
+            # Long hold
             self._last_click_time = time.time()
 
+            if self._paused:
+                # Held while paused → just unpause
+                self._toggle_pause()
+            else:
+                # Normal PTT release
+                if self._agent:
+                    self._agent.set_input_enabled(False)
+                    self._agent.suppress_output_for(self.RESPONSE_DELAY_SEC)
+                self._update_display(
+                    status="thinking",
+                    emoji="🤔",
+                    text="Let me think...",
+                    turn="amber",
+                )
+            self._touch_activity()
+
+    def _on_single_click(self):
+        """Single click detected — toggle pause/unpause."""
+        self._toggle_pause()
+
+    def _toggle_pause(self):
+        """Toggle pause state during an active conversation."""
+        name = Config.COMPANION_NAME
+        if self._paused:
+            # Unpause
+            self._paused = False
             if self._agent:
-                self._agent.set_input_enabled(False)
-                self._agent.suppress_output_for(self.RESPONSE_DELAY_SEC)
+                self._agent.set_paused(False)
+            print("[State] Unpaused")
             self._update_display(
-                status="thinking",
-                emoji="🤔",
-                text="Let me think...",
-                turn="amber",
+                status="ready",
+                emoji="🐷",
+                text=f"{name} is back!",
+                turn="red",
             )
             self._touch_activity()
+        else:
+            # Pause
+            self._paused = True
+            if self._agent:
+                self._agent.silence_agent()
+                self._agent.set_paused(True)
+            print("[State] Paused")
+            self._cancel_timer("_idle_timer")
+            self._update_display(
+                status="paused",
+                emoji="⏸️",
+                text="Paused — tap to resume",
+                turn="paused",
+            )
 
     def _on_kill_press(self):
         """Fired when button is held for 10s — enters deep sleep."""
@@ -494,6 +566,12 @@ class VoiceAgentStateMachine:
     def _handle_agent_event(self, event_type, data):
         if event_type in ("ready", "connected"):
             pass
+
+        # While paused, only process errors, disconnects, and function calls
+        elif self._paused and event_type not in (
+            "error", "warning", "disconnected", "function_call"
+        ):
+            return
 
         elif event_type == "user_speaking":
             self._touch_activity()
@@ -625,7 +703,7 @@ class LegacyStateMachine:
         self._answer_id = 0
         self._active_game = None
 
-        set_volume(70)
+        set_volume(100)
         set_capture_volume(100)
 
         self._set_state("idle")
