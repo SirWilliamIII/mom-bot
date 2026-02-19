@@ -118,6 +118,7 @@ class VoiceAgentStateMachine:
             text="I'm listening...",
             turn="green",
             scroll_speed=0,
+            image_path="",
         )
 
         self._agent = VoiceAgent(on_event=self._on_agent_event)
@@ -229,13 +230,25 @@ class VoiceAgentStateMachine:
     def _enter_idle(self, **kwargs):
         name = Config.COMPANION_NAME
         text = kwargs.get("text", f"Hold button to talk to {name}!")
-        self._update_display(
-            status="sleeping",
-            emoji="🐷",
-            text=text,
-            turn="sleep",
-            scroll_speed=0,
-        )
+        # Show family photo on idle screen (if configured), otherwise fall back
+        idle_img = Config.IDLE_IMAGE_PATH
+        if idle_img and os.path.exists(idle_img):
+            self._update_display(
+                status="sleeping",
+                emoji="🐷",
+                text=text,
+                turn="sleep",
+                scroll_speed=0,
+                image_path=idle_img,
+            )
+        else:
+            self._update_display(
+                status="sleeping",
+                emoji="🐷",
+                text=text,
+                turn="sleep",
+                scroll_speed=0,
+            )
         if self.board:
             self.board.on_button_press(self._on_button_press_idle)
             self.board.on_button_release(self._on_button_release_idle)
@@ -246,6 +259,8 @@ class VoiceAgentStateMachine:
 
     def _enter_active(self, **kwargs):
         name = Config.COMPANION_NAME
+        # Clear idle image — active states use Piglet sprite
+        display_state.update(image_path="")
         # Don't overwrite "listening" display if user is still holding button
         if not self._holding:
             self._update_display(
