@@ -8,7 +8,8 @@ import threading
 
 from config import Config
 from core.state_machine import create_state_machine
-from ui.renderer import RenderThread
+from services.battery import BatteryMonitor
+from ui.renderer import RenderThread, display_state
 
 
 def _clear_pycache():
@@ -125,6 +126,10 @@ def main():
 
     sm = create_state_machine(board, render_thread)
 
+    # --- Battery monitor ---
+    battery_mon = BatteryMonitor(board, display_state)
+    battery_mon.start()
+
     # --- Cleanup: runs on SIGTERM, SIGINT, and atexit ---
     _cleanup_done = threading.Event()
 
@@ -138,6 +143,10 @@ def main():
             sig_name = signal.Signals(signum).name if hasattr(signal, 'Signals') else str(signum)
         print(f"\n[System] Shutting down... (signal={sig_name or 'exit'})")
 
+        try:
+            battery_mon.stop()
+        except Exception:
+            pass
         try:
             sm.stop()
         except Exception:
