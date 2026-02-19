@@ -48,6 +48,7 @@ def _kill_previous_instance():
     to free the pins is to kill that process.
     """
     my_pid = os.getpid()
+    killed = False
     # Match both new app (main.py) and old app (chatbot-ui.py)
     for pattern in ("python.*main\\.py", "python.*chatbot-ui\\.py"):
         try:
@@ -61,9 +62,23 @@ def _kill_previous_instance():
                     print(f"[Cleanup] Killing previous instance (PID {pid})")
                     subprocess.run(["kill", "-9", pid],
                                    capture_output=True, timeout=2)
-                    time.sleep(1.5)  # kernel needs time to release GPIO
+                    killed = True
         except Exception:
             pass
+
+    # Also kill anything holding GPIO chip handles directly —
+    # this is the only reliable way to free pins after a crash
+    for chip in ("/dev/gpiochip4", "/dev/gpiochip0"):
+        if os.path.exists(chip):
+            try:
+                subprocess.run(["fuser", "-k", chip],
+                               capture_output=True, timeout=3)
+                killed = True
+            except Exception:
+                pass
+
+    if killed:
+        time.sleep(2)  # kernel needs time to release GPIO handles
 
 
 def _sync_asoundrc():
