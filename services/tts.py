@@ -35,13 +35,14 @@ def _openai_tts_to_file(text, output_path=None):
     client = OpenAI(api_key=Config.OPENAI_API_KEY)
 
     if not output_path:
-        fd, output_path = tempfile.mkstemp(suffix=".mp3")
+        fd, output_path = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
 
     response = client.audio.speech.create(
         model="tts-1",
         voice=Config.OPENAI_TTS_VOICE,
         input=text,
+        response_format="wav",
     )
     response.stream_to_file(output_path)
     return output_path
